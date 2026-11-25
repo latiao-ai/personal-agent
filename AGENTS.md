@@ -1,29 +1,29 @@
-# OpenMausBot agent notes
+# OpenMausBot 智能体开发约定
 
-Before claiming a server or conversation change works, follow
-[`docs/verification/README.md`](docs/verification/README.md). Always launch an
-isolated fixture; never verify mutations against the user's live app or data.
+修改服务端或会话行为后，按[验证手册](docs/verification/README.md)启动隔离测试环境并验证结果，再向维护者报告功能可用。涉及写入的验证只能在隔离环境中进行，禁止使用用户正在运行的应用或真实数据。
 
-UI changes follow [`DESIGN.md`](DESIGN.md).
+修改界面时遵循[界面设计规范](DESIGN.md)。
 
-## Comments
+## 开发工作区
 
-Write a comment only for what the code cannot say:
+查进度时，已知变更名就只读 `openspec/changes/<变更名>/handoff.md` 顶部，到首个二级标题为止。未知时先看[工作区总览](openspec/WORKSPACE.md)顶部或用 `openspec list` 定位。
 
-- a license or attribution notice;
-- a fact forced by something outside this code (a vendor, CLI, OS, browser,
-  Electron or protocol behaviour), with its version when it has one;
-- the doc comment of a public contract: the wire types in `shared/`, the
-  driver interface, the preload bridge, `config.json` fields people edit;
-- a link to an upstream issue;
-- a security invariant or a known open risk.
+首次实施前，核对本版提案、维护者确认出处、当前任务、适用规范和目标路径的 Git 差异；具体步骤见总览「首次实施」。同一范围内连续修改、测试沿用该次确认。范围、权限或验收改变时先展示修订并取得确认。移交时更新交接摘要与证据，最终审计由维护者决定。
 
-Do not narrate what the next line does, restate a name, record history ("used
-to", "no longer", PR or issue numbers, plan or slice names: git has it), point
-at other files, draw banners or leave commented-out code. When our own code
-needs a paragraph to explain a surprise, change the code instead: a better
-name, a type, an extracted function, one shared helper. A rule ("never X",
-"must match Y") belongs in a type, a test or a lint rule. Never suppress a lint
-rule that guards correctness; fix the code.
+提案、设计、规范正文、任务、交接与审计说明用简体中文。命令、路径、标识符和 OpenSpec 格式标记保留原文。
 
-More specific `AGENTS.md` files override this note within their directories.
+## 代码注释
+
+仅在代码本身无法表达以下信息时添加注释：
+
+- 许可证或署名声明。
+- 外部依赖造成的约束，例如供应商、命令行工具、操作系统、浏览器、Electron 或协议的特定行为。有对应版本时注明版本。
+- 公开接口的文档，包括 `shared/` 中的通信协议类型、驱动接口、预加载桥接接口，以及用户可编辑的 `config.json` 字段。
+- 上游问题的链接。
+- 必须始终满足的安全条件，或已知且尚未解决的风险。
+
+避免在注释中复述下一行代码或已有名称。变更历史由 Git 保存，包括过去的行为、PR 或问题编号、计划名和实施阶段名。注释里也应避免跨文件指路、装饰性分隔线和已注释掉的代码。
+
+若一段实现需要整段文字才能说清，优先改进命名、补充类型、提取函数或复用同一个辅助函数。用类型、测试或静态检查表达约束。遇到保障正确性的静态检查报错，应修复代码，禁止关闭该检查。
+
+子目录有更具体的 `AGENTS.md` 时，在该目录范围内优先遵循其约定。
