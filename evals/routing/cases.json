@@ -1,0 +1,48 @@
+[
+  { "id": "inv_01", "category": "查库存", "text": "查库存", "expectedRole": "procurement", "expectTicket": false },
+  { "id": "inv_02", "category": "查库存", "text": "帮我查一下 SKU-102 的库存", "expectedRole": "procurement", "expectTicket": false },
+  { "id": "inv_03", "category": "查库存", "text": "现在仓库里还剩多少现货", "expectedRole": "procurement", "expectTicket": false },
+  { "id": "inv_04", "category": "查库存", "text": "看一下 A 款红色还有没有库存", "expectedRole": "procurement", "expectTicket": false },
+  { "id": "inv_05", "category": "查库存", "text": "盘点一下本周安全库存缺口", "expectedRole": "procurement", "expectTicket": false },
+  { "id": "inv_06", "category": "查库存", "text": "这批爆款要不要补货，查下余量", "expectedRole": "procurement", "expectTicket": false },
+
+  { "id": "fac_01", "category": "跟工厂", "text": "跟一下工厂", "expectedRole": "followup", "expectTicket": false },
+  { "id": "fac_02", "category": "跟工厂", "text": "催一下义乌工厂这批货什么时候出货", "expectedRole": "followup", "expectTicket": false },
+  { "id": "fac_03", "category": "跟工厂", "text": "问问工厂打样进度到哪一步了", "expectedRole": "followup", "expectTicket": false },
+  { "id": "fac_04", "category": "跟工厂", "text": "跟进一下东莞厂的排产和交期", "expectedRole": "followup", "expectTicket": false },
+  { "id": "fac_05", "category": "跟工厂", "text": "核实下工厂验货报告出了没", "expectedRole": "followup", "expectTicket": false },
+  { "id": "fac_06", "category": "跟工厂", "text": "工厂那边的尾货质检过了吗", "expectedRole": "followup", "expectTicket": false },
+
+  { "id": "ord_01", "category": "下单", "text": "帮我下单买 10 件", "expectedRole": "order", "expectTicket": true },
+  { "id": "ord_02", "category": "下单", "text": "给供应商 A 下一个 500 件的采购单", "expectedRole": "order", "expectTicket": true },
+  { "id": "ord_03", "category": "下单", "text": "把刚才确认的那批货直接下单付款", "expectedRole": "order", "expectTicket": true },
+  { "id": "ord_04", "category": "下单", "text": "取消订单 #9021 并申请退款", "expectedRole": "order", "expectTicket": true },
+  { "id": "ord_05", "category": "下单", "text": "帮我把这批货的库存改成 100", "expectedRole": "procurement", "expectTicket": true },
+  { "id": "ord_06", "category": "下单", "text": "给这笔货款打款 3000 元", "expectedRole": "order", "expectTicket": true },
+
+  { "id": "prc_01", "category": "查价格", "text": "查一下这款杯子的最新报价", "expectedRole": "procurement", "expectTicket": false },
+  { "id": "prc_02", "category": "查价格", "text": "比一下三家供应商的单价", "expectedRole": "procurement", "expectTicket": false },
+  { "id": "prc_03", "category": "查价格", "text": "看看 1688 上同款拿货价格是多少", "expectedRole": "procurement", "expectTicket": false },
+  { "id": "prc_04", "category": "查价格", "text": "这批面料的成本价涨了没有", "expectedRole": "procurement", "expectTicket": false },
+  { "id": "prc_05", "category": "查价格", "text": "查价格：SKU-888 阶梯报价", "expectedRole": "procurement", "expectTicket": false },
+  { "id": "prc_06", "category": "查价格", "text": "供应商最新给的含税价是多少", "expectedRole": "procurement", "expectTicket": false },
+
+  { "id": "log_01", "category": "查物流", "text": "查一下昨天发的顺丰物流到哪了", "expectedRole": "followup", "expectTicket": false },
+  { "id": "log_02", "category": "查物流", "text": "这票海运货柜清关完成了吗", "expectedRole": "followup", "expectTicket": false },
+  { "id": "log_03", "category": "查物流", "text": "查物流单号 SF1234567890", "expectedRole": "followup", "expectTicket": false },
+  { "id": "log_04", "category": "查物流", "text": "看看头程快递签收了没有", "expectedRole": "followup", "expectTicket": false },
+  { "id": "log_05", "category": "查物流", "text": "这批货在途几天了，预计哪天入仓", "expectedRole": "followup", "expectTicket": false },
+  { "id": "log_06", "category": "查物流", "text": "核对下海外仓的到货物流状态", "expectedRole": "followup", "expectTicket": false },
+
+  { "id": "cht_01", "category": "闲聊", "text": "今天天气不错", "expectedRole": "lead", "expectTicket": false },
+  { "id": "cht_02", "category": "闲聊", "text": "早上好呀", "expectedRole": "lead", "expectTicket": false },
+  { "id": "cht_03", "category": "闲聊", "text": "谢谢辛苦了", "expectedRole": "lead", "expectTicket": false },
+  { "id": "cht_04", "category": "闲聊", "text": "中午吃什么好呢", "expectedRole": "lead", "expectTicket": false },
+  { "id": "cht_05", "category": "闲聊", "text": "哈哈哈哈太逗了", "expectedRole": "lead", "expectTicket": false },
+
+  { "id": "amb_01", "category": "模糊消息", "text": "这个怎么样", "expectedRole": "lead", "expectTicket": false, "expectFallback": true },
+  { "id": "amb_02", "category": "模糊消息", "text": "帮我看看那个事", "expectedRole": "lead", "expectTicket": false, "expectFallback": true },
+  { "id": "amb_03", "category": "模糊消息", "text": "按老样子办吧", "expectedRole": "lead", "expectTicket": false, "expectFallback": true },
+  { "id": "amb_04", "category": "模糊消息", "text": "行不行啊", "expectedRole": "lead", "expectTicket": false, "expectFallback": true },
+  { "id": "amb_05", "category": "模糊消息", "text": "之前说的那个安排一下", "expectedRole": "lead", "expectTicket": false, "expectFallback": true }
+]
