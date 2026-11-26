@@ -3,12 +3,13 @@
 - Change: `decide-tenancy-architecture`
 - 阶段：MVP1.5，MVP1 收尾后、MVP2 开始前
 - 时间：2–3 天，只写文档，不改代码
-- 状态：**R1 已批准；文档已归档，维护者已要求将本机全部修改提交并推送，发布进行中**
+- 状态：**R1 已批准；文档已归档，本机全部修改已提交并推送到 `origin/main`**
 - 授权出处：本会话用户于 2026-11-26 指示“照着这个 tasks.md 文件，把任务不断完成”；按任务定义登记为 R1，仅限六项决策及文档，不扩围。
 - 分支与基线：`main`，`92eb6457ff128d4bbbd622ab9e4b42da4200f473`；工作区另有未提交变更，本 change 不包含它们。
 - 最近验证：`openspec validate --all --strict --no-interactive` 通过；`openspec status --change decide-tenancy-architecture --json` 可见。
 - 发布授权：用户于 2026-11-26 明确要求将本机所有修改提交并推送到 GitHub；按该要求一并发布本 change 与同工作区其他变更。
-- 下一步：推送本机全部变更至 `origin/main`。
+- 最近发布：提交 `2a15dc0b9`，22 个文件，已推送至 `origin/main`。
+- 下一步：无；后续实现另开 change。
 - 依据：提案记录的 `~/workspace/personal-agent-mvp1-upgrade-roadmap.md` 在当前环境不可读取；当前范围与任务来自仓库内提案及用户本会话授权。
 
 ## 已确认的基线
@@ -53,5 +54,7 @@
 - `openspec status --change decide-tenancy-architecture --json`：确认 change 在仓库中，完整且有 proposal/spec/design/tasks。
 - 已归档：`openspec/changes/archive/2026-11-26-decide-tenancy-architecture/`；生效规范位于 `openspec/specs/tenancy-architecture/spec.md`。
 - 本次发布按用户要求覆盖工作区全部变更，不限于本 change。
-- 推送前运行 `openspec validate --all --strict --no-interactive`，并核对提交文件列表和凭据脱敏。
+- `openspec validate --all --strict --no-interactive`：通过，3 项通过、0 失败。
+- `openspec validate --archived --strict --no-interactive`：通过，1 项通过、0 失败；`openspec validate --all --strict --no-interactive` 复验也通过。
+- GitHub 推送：`92eb6457f..2a15dc0b9 main -> main`。飞书 handoff 中的 App ID 已脱敏。
 - 下一项 MVP2a `add-ticket` 应另开 change，开始前按工作区要求复用盘点 `server/app-triggers.ts`、`routine-*.ts`、`permission-proxy.ts` 与 `docs/approval-levels.md`。

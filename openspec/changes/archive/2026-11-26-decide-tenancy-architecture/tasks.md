@@ -26,4 +26,4 @@
 - [x] 7. 人批 R1：用户于 2026-11-26 指示“照着这个 tasks.md 文件，把任务不断完成”，据此批准 R1；范围仅限本文档的 6 个决策和文档，不扩围。扩大范围必须出 R2，重新批。
 - [x] 8. 校验：`openspec validate --all --strict --no-interactive` 通过；`openspec status --change decide-tenancy-architecture --json` 能看到它。
 - [x] 9. 归档：已由 `openspec archive decide-tenancy-architecture` 归档至本目录，生效规范已复制到 `openspec/specs/tenancy-architecture/spec.md`。
-- [ ] 10. 推送：维护者最终审计接受并确定发布后，将本 change 的改动推送到 https://github.com/latiao-ai/personal-agent；不得把工作区中其他未提交文件带入提交。
+- [x] 10. 推送：按用户要求，将本机全部修改提交并推送到 https://github.com/latiao-ai/personal-agent 的 `main`；提交 `2a15dc0b9`，共 22 个文件。
