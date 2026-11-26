@@ -5,6 +5,7 @@ import type {
   ActionCategory,
   ApprovalAuditRecord,
   ApprovalCard,
+  ApprovalChannel,
   ApprovalEvaluateInput,
   ApprovalEvaluationResult,
   DualBudgetPolicy,
@@ -12,10 +13,27 @@ import type {
   FeishuCardCallbackResult,
 } from "../../shared/approvals.ts";
 import { DATA_DIR } from "../config.ts";
-import { evaluateDualBudget, utcDayKey, utcMonthKey } from "./budget.ts";
+import { evaluateDualBudget, utcDayKey, utcMonthKey, type SpendTotals } from "./budget.ts";
 import { ApprovalStore } from "./store.ts";
 import { inferActionCategory, isMandatoryHumanCategory, runGuardedReviewer, type ApprovalReviewer } from "./tiers.ts";
 import { ControlPlaneVault } from "./vault.ts";
+
+export interface ApprovalCardEvent {
+  type: "created" | "updated";
+  card: ApprovalCard;
+  channel: ApprovalChannel | null;
+  statusBanner: string | null;
+  at: number;
+}
+
+export function formatApprovalStatusBanner(card: Pick<ApprovalCard, "status" | "decidedBy" | "decisionChannel">): string | null {
+  if (card.status === "pending") return null;
+  if (card.status === "expired") return "已过期";
+  const channelLabel = card.decisionChannel === "web" ? "网页" : "飞书";
+  const actor = card.decidedBy ?? "审批人";
+  const verb = card.status === "approved" ? "批准" : "拒绝";
+  return `已由 ${actor} 在${channelLabel}${verb}`;
+}
 
 const DEFAULT_CARD_TTL_MS = 30 * 60_000;
 const DEFAULT_REVIEWER_TIMEOUT_MS = 3_000;
@@ -39,6 +57,7 @@ export class ApprovalEngine {
   private reviewer?: ApprovalReviewer;
   private readonly reviewerTimeoutMs: number;
   private readonly now: () => number;
+  private readonly cardListeners = new Set<(event: ApprovalCardEvent) => void>();
 
   constructor(options: ApprovalEngineOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -46,6 +65,35 @@ export class ApprovalEngine {
     this.vault = options.vault ?? new ControlPlaneVault(this.now);
     this.reviewer = options.reviewer;
     this.reviewerTimeoutMs = options.reviewerTimeoutMs ?? DEFAULT_REVIEWER_TIMEOUT_MS;
+  }
+
+  onCardEvent(listener: (event: ApprovalCardEvent) => void): () => void {
+    this.cardListeners.add(listener);
+    return () => {
+      this.cardListeners.delete(listener);
+    };
+  }
+
+  private emitCardEvent(type: "created" | "updated", card: ApprovalCard, channel: ApprovalChannel | null): void {
+    const event: ApprovalCardEvent = {
+      type,
+      card,
+      channel,
+      statusBanner: formatApprovalStatusBanner(card),
+      at: this.now(),
+    };
+    for (const listener of this.cardListeners) {
+      try {
+        listener(event);
+      } catch {
+        // Listener failures must never disrupt control-plane approval transitions.
+      }
+    }
+  }
+
+  getSpendTotals(tenantId: string): SpendTotals {
+    const now = this.now();
+    return this.store.getSpendTotals(tenantId, utcDayKey(now), utcMonthKey(now));
   }
 
   setReviewer(reviewer: ApprovalReviewer | undefined): void {
@@ -265,6 +313,7 @@ export class ApprovalEngine {
    */
   handleCardCallback(input: FeishuCardCallbackInput): FeishuCardCallbackResult {
     const now = this.now();
+    const channel: ApprovalChannel = input.channel ?? "feishu";
     const card = this.store.getCard(input.cardId);
     if (!card) {
       return {
@@ -290,7 +339,8 @@ export class ApprovalEngine {
         tokenCost: card.tokenCost,
         businessCost: card.businessCost,
         currency: card.currency,
-        reason: `非批准人点击卡片: expected=${card.approverOpenId}, actual=${input.operatorOpenId}`,
+        channel,
+        reason: `非批准人点击卡片(${channel}): expected=${card.approverOpenId}, actual=${input.operatorOpenId}`,
       });
       return {
         ok: false,
@@ -315,7 +365,8 @@ export class ApprovalEngine {
         tokenCost: card.tokenCost,
         businessCost: card.businessCost,
         currency: card.currency,
-        reason: `卡片已处理(${card.status})，忽略重复点击`,
+        channel,
+        reason: `卡片已处理(${card.status})，忽略来自 ${channel} 的重复点击`,
       });
       return {
         ok: true,
@@ -323,13 +374,18 @@ export class ApprovalEngine {
         idempotent: true,
         ticketId: card.ticketId,
         cardStatus: card.status,
+        decidedBy: card.decidedBy,
+        decisionChannel: card.decisionChannel ?? null,
+        statusBanner: formatApprovalStatusBanner(card),
         message: "已处理",
       };
     }
 
     // 3. Expiration check against Mandate valid_until / card expiresAt.
     if (now > card.expiresAt) {
-      this.store.transitionPendingCard(card.id, "expired", now, input.operatorOpenId, input.action);
+      this.store.transitionPendingCard(card.id, "expired", now, input.operatorOpenId, input.action, channel);
+      const expiredCard = this.store.getCard(card.id);
+      if (expiredCard) this.emitCardEvent("updated", expiredCard, channel);
       this.recordAudit({
         tenantId: card.tenantId,
         ticketId: card.ticketId,
@@ -343,6 +399,7 @@ export class ApprovalEngine {
         tokenCost: card.tokenCost,
         businessCost: card.businessCost,
         currency: card.currency,
+        channel,
         reason: "审批卡片已过期，拒绝执行",
       });
       return {
@@ -356,7 +413,7 @@ export class ApprovalEngine {
 
     // 4. Deny branch.
     if (input.action === "deny") {
-      const transitioned = this.store.transitionPendingCard(card.id, "denied", now, input.operatorOpenId, "deny");
+      const transitioned = this.store.transitionPendingCard(card.id, "denied", now, input.operatorOpenId, "deny", channel);
       if (!transitioned) {
         const latest = this.store.getCard(card.id)!;
         return {
@@ -365,9 +422,14 @@ export class ApprovalEngine {
           idempotent: true,
           ticketId: card.ticketId,
           cardStatus: latest.status,
+          decidedBy: latest.decidedBy,
+          decisionChannel: latest.decisionChannel ?? null,
+          statusBanner: formatApprovalStatusBanner(latest),
           message: "已处理",
         };
       }
+      const updated = this.store.getCard(card.id);
+      if (updated) this.emitCardEvent("updated", updated, channel);
       this.recordAudit({
         tenantId: card.tenantId,
         ticketId: card.ticketId,
@@ -381,7 +443,8 @@ export class ApprovalEngine {
         tokenCost: card.tokenCost,
         businessCost: card.businessCost,
         currency: card.currency,
-        reason: "批准人拒绝执行",
+        channel,
+        reason: `批准人在${channel === "web" ? "网页" : "飞书"}拒绝执行`,
       });
       return {
         ok: true,
@@ -390,11 +453,13 @@ export class ApprovalEngine {
         ticketId: card.ticketId,
         ticketStatus: "cancelled",
         cardStatus: "denied",
+        channel,
+        decidedBy: input.operatorOpenId,
       };
     }
 
     // 5. Approve branch (allow_once / always_allow) - atomic transition prevents double execution.
-    const transitioned = this.store.transitionPendingCard(card.id, "approved", now, input.operatorOpenId, input.action);
+    const transitioned = this.store.transitionPendingCard(card.id, "approved", now, input.operatorOpenId, input.action, channel);
     if (!transitioned) {
       const latest = this.store.getCard(card.id)!;
       return {
@@ -403,7 +468,9 @@ export class ApprovalEngine {
         idempotent: true,
         ticketId: card.ticketId,
         cardStatus: latest.status,
-        message: "已处理",
+        decidedBy: latest.decidedBy,
+        decisionChannel: latest.decisionChannel ?? null,
+        message: formatApprovalStatusBanner(latest) ?? "已处理",
       };
     }
 
@@ -488,8 +555,15 @@ export class ApprovalEngine {
       tokenCost: card.tokenCost,
       businessCost: card.businessCost,
       currency: card.currency,
-      reason: input.action === "always_allow" ? "批准人允许（请求同类放行）" : "批准人单次允许",
+      channel,
+      reason:
+        input.action === "always_allow"
+          ? `批准人在${channel === "web" ? "网页" : "飞书"}允许（请求同类放行）`
+          : `批准人在${channel === "web" ? "网页" : "飞书"}单次允许`,
     });
+
+    const updated = this.store.getCard(card.id);
+    if (updated) this.emitCardEvent("updated", updated, channel);
 
     return {
       ok: true,
@@ -498,6 +572,8 @@ export class ApprovalEngine {
       ticketId: card.ticketId,
       ticketStatus: "executing",
       cardStatus: "approved",
+      channel,
+      decidedBy: input.operatorOpenId,
       surrogateToken,
       alwaysAllowSaved,
     };
@@ -511,7 +587,11 @@ export class ApprovalEngine {
     return this.store.listCards(limit);
   }
 
-  listAudit(filter?: { ticketId?: string; approverOpenId?: string; limit?: number }): ApprovalAuditRecord[] {
+  listCardsByTenant(tenantId: string, limit = 100): ApprovalCard[] {
+    return this.store.listCardsByTenant(tenantId, limit);
+  }
+
+  listAudit(filter?: { tenantId?: string; ticketId?: string; approverOpenId?: string; limit?: number }): ApprovalAuditRecord[] {
     return this.store.listAudit(filter);
   }
 
@@ -583,9 +663,11 @@ export class ApprovalEngine {
       decidedAt: null,
       decidedBy: null,
       decisionAction: null,
+      decisionChannel: null,
       feishuCardPayload,
     };
     this.store.insertCard(card);
+    this.emitCardEvent("created", card, null);
     return card;
   }
 

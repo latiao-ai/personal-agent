@@ -34,9 +34,14 @@ const pageLanguage = loadPageLanguage();
 
 // The app is its own chunk, so these pages don't parse it. Everywhere else its fetch starts now, alongside the session
 // read, instead of after it. A failed fetch renders as a throw, so PageBoundary offers a reload.
-const PAGES_WITHOUT_THE_APP = new Set(["/home", "/pair", "/desktop-viewer"]);
+const PAGES_WITHOUT_THE_APP = new Set(["/home", "/pair", "/desktop-viewer", "/portal", "/admin"]);
+const isPortalPath = (pathname: string) => pathname === "/portal" || pathname.startsWith("/portal/");
+const isAdminPath = (pathname: string) => pathname === "/admin" || pathname.startsWith("/admin/");
 const loadApp = () => import("./App").catch((error: unknown) => ({ default: (): never => { throw error; } }));
-const appPage = PAGES_WITHOUT_THE_APP.has(location.pathname) ? null : loadApp();
+const appPage =
+  PAGES_WITHOUT_THE_APP.has(location.pathname) || isPortalPath(location.pathname) || isAdminPath(location.pathname)
+    ? null
+    : loadApp();
 if (appPage) startDesktopLaunchMarks();
 
 /** A team's name as its server describes itself to anyone (the descriptor's label), null when it can't say. */
@@ -44,6 +49,14 @@ const teamName = () => serverFetch("/.well-known/openmausbot/environment").then(
   .then((descriptor) => (descriptor.capabilities?.cloudTeam === true && typeof descriptor.label === "string" ? descriptor.label : null), () => null);
 
 async function chooseRoot(): Promise<React.ReactNode> {
+  if (isPortalPath(location.pathname)) {
+    const { CustomerPortalApp } = await import("./portal/CustomerPortalApp");
+    return <CustomerPortalApp />;
+  }
+  if (isAdminPath(location.pathname)) {
+    const { AdminConsoleApp } = await import("./admin/AdminConsoleApp");
+    return <AdminConsoleApp />;
+  }
   const home = window.ogb?.home;
   if (location.pathname === "/home" && home) return <HomeScreen bridge={home} manage={window.ogb?.cloudPlan?.manage} />;
   if (location.pathname === "/pair") {

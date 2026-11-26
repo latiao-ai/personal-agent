@@ -24,6 +24,7 @@ const callbackSchema = z.object({
   cardId: z.string().min(1),
   operatorOpenId: z.string().min(1),
   action: z.enum(["allow_once", "always_allow", "deny"]),
+  channel: z.enum(["feishu", "web"]).optional(),
   callbackEventId: z.string().optional(),
 });
 

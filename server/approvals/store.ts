@@ -8,6 +8,7 @@ import type {
   ApprovalButtonAction,
   ApprovalCard,
   ApprovalCardStatus,
+  ApprovalChannel,
   DualBudgetPolicy,
 } from "../../shared/approvals.ts";
 import { DEFAULT_DUAL_BUDGET_POLICY, type SpendTotals } from "./budget.ts";
@@ -51,10 +52,12 @@ export class ApprovalStore {
         decided_at INTEGER,
         decided_by TEXT,
         decision_action TEXT,
+        decision_channel TEXT,
         feishu_card_json TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_approval_cards_ticket ON approval_cards(ticket_id);
       CREATE INDEX IF NOT EXISTS idx_approval_cards_status ON approval_cards(status);
+      CREATE INDEX IF NOT EXISTS idx_approval_cards_tenant ON approval_cards(tenant_id);
 
       CREATE TABLE IF NOT EXISTS always_allow_rules (
         rule_key TEXT PRIMARY KEY,
@@ -102,11 +105,25 @@ export class ApprovalStore {
         token_cost REAL NOT NULL,
         business_cost REAL NOT NULL,
         currency TEXT NOT NULL,
+        channel TEXT,
         reason TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_approval_audit_ticket ON approval_audit_log(ticket_id);
       CREATE INDEX IF NOT EXISTS idx_approval_audit_at ON approval_audit_log(at);
+      CREATE INDEX IF NOT EXISTS idx_approval_audit_tenant ON approval_audit_log(tenant_id);
     `);
+    this.ensureDualChannelColumns();
+  }
+
+  private ensureDualChannelColumns(): void {
+    const cardCols = this.db.prepare(`PRAGMA table_info(approval_cards)`).all() as Array<{ name: string }>;
+    if (!cardCols.some((c) => c.name === "decision_channel")) {
+      this.db.exec(`ALTER TABLE approval_cards ADD COLUMN decision_channel TEXT`);
+    }
+    const auditCols = this.db.prepare(`PRAGMA table_info(approval_audit_log)`).all() as Array<{ name: string }>;
+    if (!auditCols.some((c) => c.name === "channel")) {
+      this.db.exec(`ALTER TABLE approval_audit_log ADD COLUMN channel TEXT`);
+    }
   }
 
   insertCard(card: ApprovalCard): void {
@@ -116,8 +133,8 @@ export class ApprovalStore {
           id, ticket_id, tenant_id, initiator, approver_open_id,
           action_summary, action_category, tool_name, recipient, risk_summary,
           token_cost, business_cost, currency, status,
-          created_at, expires_at, decided_at, decided_by, decision_action, feishu_card_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          created_at, expires_at, decided_at, decided_by, decision_action, decision_channel, feishu_card_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         card.id,
@@ -139,6 +156,7 @@ export class ApprovalStore {
         card.decidedAt,
         card.decidedBy,
         card.decisionAction,
+        card.decisionChannel ?? null,
         JSON.stringify(card.feishuCardPayload),
       );
   }
@@ -157,6 +175,13 @@ export class ApprovalStore {
     return rows.map(rowToCard);
   }
 
+  listCardsByTenant(tenantId: string, limit = 100): ApprovalCard[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM approval_cards WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?`)
+      .all(tenantId, limit) as Record<string, unknown>[];
+    return rows.map(rowToCard);
+  }
+
   /** Atomically transitions a pending card so duplicate clicks can never execute twice. */
   transitionPendingCard(
     cardId: string,
@@ -164,14 +189,15 @@ export class ApprovalStore {
     decidedAt: number,
     decidedBy: string | null,
     decisionAction: ApprovalButtonAction | null,
+    decisionChannel: ApprovalChannel | null = null,
   ): boolean {
     const result = this.db
       .prepare(
         `UPDATE approval_cards
-         SET status = ?, decided_at = ?, decided_by = ?, decision_action = ?
+         SET status = ?, decided_at = ?, decided_by = ?, decision_action = ?, decision_channel = ?
          WHERE id = ? AND status = 'pending'`,
       )
-      .run(nextStatus, decidedAt, decidedBy, decisionAction, cardId);
+      .run(nextStatus, decidedAt, decidedBy, decisionAction, decisionChannel, cardId);
     return Number(result.changes) > 0;
   }
 
@@ -289,8 +315,8 @@ export class ApprovalStore {
       .prepare(
         `INSERT INTO approval_audit_log (
           id, at, tenant_id, ticket_id, card_id, approver_open_id, actor,
-          mandate_summary, action, tier, decision, token_cost, business_cost, currency, reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          mandate_summary, action, tier, decision, token_cost, business_cost, currency, channel, reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
@@ -307,14 +333,19 @@ export class ApprovalStore {
         record.tokenCost,
         record.businessCost,
         record.currency,
+        record.channel ?? null,
         record.reason,
       );
   }
 
-  listAudit(filter?: { ticketId?: string; approverOpenId?: string; limit?: number }): ApprovalAuditRecord[] {
+  listAudit(filter?: { tenantId?: string; ticketId?: string; approverOpenId?: string; limit?: number }): ApprovalAuditRecord[] {
     const limit = filter?.limit ?? 100;
     let rows: Record<string, unknown>[];
-    if (filter?.ticketId) {
+    if (filter?.tenantId) {
+      rows = this.db
+        .prepare(`SELECT * FROM approval_audit_log WHERE tenant_id = ? ORDER BY at DESC LIMIT ?`)
+        .all(filter.tenantId, limit) as Record<string, unknown>[];
+    } else if (filter?.ticketId) {
       rows = this.db
         .prepare(`SELECT * FROM approval_audit_log WHERE ticket_id = ? ORDER BY at DESC LIMIT ?`)
         .all(filter.ticketId, limit) as Record<string, unknown>[];
@@ -342,6 +373,7 @@ export class ApprovalStore {
       tokenCost: Number(row.token_cost),
       businessCost: Number(row.business_cost),
       currency: String(row.currency),
+      channel: row.channel ? (row.channel as ApprovalChannel) : null,
       reason: String(row.reason),
     }));
   }
@@ -372,6 +404,7 @@ function rowToCard(row: Record<string, unknown>): ApprovalCard {
     decidedAt: row.decided_at !== null && row.decided_at !== undefined ? Number(row.decided_at) : null,
     decidedBy: row.decided_by ? String(row.decided_by) : null,
     decisionAction: row.decision_action ? (row.decision_action as ApprovalCard["decisionAction"]) : null,
+    decisionChannel: row.decision_channel ? (row.decision_channel as ApprovalChannel) : null,
     feishuCardPayload: JSON.parse(String(row.feishu_card_json)) as Record<string, unknown>,
   };
 }

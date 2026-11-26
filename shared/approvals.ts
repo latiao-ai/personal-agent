@@ -13,6 +13,9 @@ export type ApprovalButtonAction = "allow_once" | "always_allow" | "deny";
 
 export type ApprovalCardStatus = "pending" | "approved" | "denied" | "expired";
 
+/** Channel through which a human approval decision was submitted. */
+export type ApprovalChannel = "feishu" | "web";
+
 /** Per-transaction, daily, and monthly caps for both model token cost and business spend. */
 export interface DualBudgetPolicy {
   tokenPerTx: number;
@@ -64,6 +67,7 @@ export interface ApprovalCard {
   decidedAt: number | null;
   decidedBy: string | null;
   decisionAction: ApprovalButtonAction | null;
+  decisionChannel?: ApprovalChannel | null;
   /** Ready-to-send Feishu interactive card JSON payload (`card.action.trigger`). */
   feishuCardPayload: Record<string, unknown>;
 }
@@ -95,6 +99,8 @@ export interface FeishuCardCallbackInput {
   cardId: string;
   operatorOpenId: string;
   action: ApprovalButtonAction;
+  /** Decision source channel; defaults to "feishu" for Feishu card callbacks. */
+  channel?: ApprovalChannel;
   /** Optional Feishu callback token/event id for tracing. */
   callbackEventId?: string;
 }
@@ -107,6 +113,8 @@ export type FeishuCardCallbackResult =
       ticketId: string;
       ticketStatus: "executing";
       cardStatus: "approved";
+      channel: ApprovalChannel;
+      decidedBy: string;
       surrogateToken: EphemeralSurrogateToken;
       alwaysAllowSaved: boolean;
     }
@@ -117,6 +125,8 @@ export type FeishuCardCallbackResult =
       ticketId: string;
       ticketStatus: "cancelled";
       cardStatus: "denied";
+      channel: ApprovalChannel;
+      decidedBy: string;
     }
   | {
       ok: true;
@@ -124,6 +134,9 @@ export type FeishuCardCallbackResult =
       idempotent: true;
       ticketId: string;
       cardStatus: ApprovalCardStatus;
+      decidedBy?: string | null;
+      decisionChannel?: ApprovalChannel | null;
+      statusBanner?: string | null;
       message: string;
     }
   | {
@@ -163,5 +176,6 @@ export interface ApprovalAuditRecord {
   tokenCost: number;
   businessCost: number;
   currency: string;
+  channel?: ApprovalChannel | null;
   reason: string;
 }
