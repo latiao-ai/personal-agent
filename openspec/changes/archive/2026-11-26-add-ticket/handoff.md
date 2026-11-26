@@ -30,7 +30,8 @@
 - `server/tickets/store.ts`：基于 `node:sqlite` 的独立控制面 SQLite 存储（`DATA_DIR/tickets.sqlite`，权限 `0600`，WAL 模式），含 `tickets`、`ticket_receipts`、`ticket_audit_log` 三表及事务性写入/作废替换。
 - `server/tickets/engine.ts`：`TicketEngine`（唯一写工单者），实现白名单鉴权、按 `event_id` 或内容哈希+时间窗口去重、外部事件默认 `observe`、白名单私聊正常回复、Mandate 修订（旧单 `superseded` + 新单 `parentId` 关联）、以及 agent 修改 Mandate 拒绝与审计记录。
 - `server/routes/tickets.ts`：控制面 HTTP 接口（`POST /api/tickets/intake`、`GET /api/tickets`、`GET /api/tickets/:id`、`GET /api/tickets/:id/mandate`、`PATCH|PUT /api/tickets/:id/mandate` & `POST /api/tickets/:id/mandate/mutate` 403 拒绝并记审计、`POST /api/tickets/:id/revise`、`GET /api/tickets/audit`）。
-- `server/index.ts`：最小改动挂载 `TicketEngine` 与 `createTicketRoutes`，在 `webhooks.enqueue` 挂接外部事件 `observe` 入票，并在 `gracefulShutdown` 关闭 SQLite 连接。
+- `server/tickets/host.ts`：组合 `TicketEngine`、HTTP routes、外部 Webhook observe 接入与 SQLite 关闭；`server/index.ts` 仅创建 host、挂载 routes 并在关机时释放。
+- `server/index.ts`：在 `webhooks.enqueue` 接入外部事件 `observe` 入票，继续应用 usage cap 并调用原有 Routine 队列。
 - `server/tickets/tickets.test.ts`：单元测试与路由测试（8 个用例）。
 - `openspec/changes/add-ticket/.openspec.yaml`、`specs/ticket/spec.md`、`tasks.md`、`handoff.md`：OpenSpec 元数据、校准后的严格规范、任务进度与交接记录。
 
@@ -41,6 +42,7 @@
 3. **隔离端到端验证**：启动独立临时 `OMB_DATA_DIR` 与随机端口的真实 `server/dev-server.ts`（不触碰本机运行实例与真实数据），逐条验证 `specs/ticket/spec.md` 的 8 个场景 → **ALL ISOLATED E2E TICKET SCENARIOS PASSED**，验证 `tickets.sqlite` 权限为 `0600` 且 6 类审计事件全部落库，测完自动终止进程并清理临时目录。
 4. **OpenSpec 严格校验**：`openspec validate --all --strict --no-interactive` → **4 passed, 0 failed**。
 5. **静态检查与回归**：`pnpm exec oxlint --deny-warnings shared/tickets.ts server/tickets/ server/routes/tickets.ts` → **0 warnings, 0 errors**；`pnpm exec vitest run server/webhooks.test.ts` → **43/43 通过**。
+6. **组合根文件长度约束**：首次 push 被 `file-size-ratchet.test.ts` 拒绝，`server/index.ts` 超出基线 10 行。将 Ticket 创建、route 与关闭职责抽到 `server/tickets/host.ts`，后续 `wc -l server/index.ts` 为 15,276，`pnpm typecheck` 退出码 0。
 
 ## 批准记录
 
