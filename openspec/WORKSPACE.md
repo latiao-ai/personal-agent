@@ -62,6 +62,7 @@ OpenSpec 的材料就绪、任务勾选与维护者的确认分别留证。实�
 - 2026-11-26 · MVP2a `add-ticket` 已完成控制面工单引擎（独立 SQLite `tickets.sqlite`、不可变 Mandate 哈希与签名只读副本、确定性副作用分类、外部事件 `observe`、白名单鉴权与去重、HTTP 控制面接口及 403 防篡改拦截），8 项单测、43 项 webhook 回归、全仓 typecheck、oxlint 及隔离端到端 8 场景全部通过，经维护者确认归档并推送 `origin/main`。
 - 2026-11-26 · MVP2b `add-approval` 已完成四层分层审批（代码规则→受保护评审模型→飞书交互卡片→交回给人）、评审模型单向升档与超时降级、飞书卡片批准人/过期/幂等校验、租户 Vault 临时替身 token、双口径（token + 业务）单笔/日/月预算上限及控制面审批审计落库，全部单元测试、静态检查、typecheck 及隔离端到端 8 场景一次性通过，已归档并推送 `origin/main`。
 - 2026-11-26 · MVP3 `add-routing` 已完成两层群聊路由（门口 Jev 固定规则+小模型快分流+回落 lead bot、里面 Router-Worker 复用 MVP2a TicketEngine、飞书群 `@` 门控、Specialist 禁止直发群、Bot 自身防循环、`max_hops = 4` 超限交回给人）与 40 条 `evals/routing/cases.json` 样例集（误派率 0% < 5%、回落率 12.5% < 20%），24 项单测、oxlint、typecheck 及隔离端到端 7 场景一次性通过，已归档并推送 `origin/main`。
+- 2026-11-26 · MVP4 `add-readonly-patrol` 已完成只读巡检控制面（`PatrolEngine` 防重叠跳过与运行时限、工具层 `PatrolPermissionGuard` 按巡检 Mandate 纯读白名单拦截写/发消息/付款/控浏览器、库存与新订单最小 Ontology 规范字段适配器与 4 类桩接口、三档分流与每日一次日报、大问题带证据升级 MVP2a TicketEngine + MVP2b ApprovalEngine、小模型巡检/异常大模型复核/增量摘要缓存与独立巡检 token 账本），Vitest 35/35、tsc、oxlint、隔离端到端 7/7 及 `openspec validate --all --strict` 全通过，经维护者确认归档并推送 `origin/main`。
 - 2026-11-26 · 网关隔离单测 5 项通过，聊天、审批及连接器客户端回归 88 项通过；服务端集成测试受 `listen EPERM` 阻塞，未误标完整回归通过。
 - 2026-11-26 · Mac 终端启动的隔离 fixture 健康检查 9 项通过；Regression bot 聊天任务 settled，假引擎回复核验通过。lark-cli 停止后未见残留飞书连接；单消费者现场消息及服务端集成回归待验。
 - 2026-11-26 · Mac 隔离环境聊天/连接器 36 项、审批卡片及工具审批 123 项通过；原有聊天、审批、连接器回归项完成。另一个白名单外账号与整机断网恢复仍待验收。
