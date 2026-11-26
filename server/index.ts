@@ -640,6 +640,7 @@ import { createDevsReports } from "./host/devs-reports.ts"; import { createSetti
 import { createCardRequester, linePersonKey } from "./host/thread-person.ts"; import { selfThreadRefusal } from "./host/self-threads.ts"; import { lookedAfterBy } from "./host/looked-after.ts"; import { createActingPeople, HANDED_PEOPLE_FILE, HandedPeople, type HandedRun, keptPrivate, privateHandBack, withPerson } from "./host/acting-person.ts"; import { createTurnCallSignals } from "./host/turn-call-signals.ts";
 import { createThreadRoutes } from "./routes/threads.ts";
 import { createWebhookRoutes } from "./routes/webhooks.ts"; import { createRemoteTeammateRoutes } from "./routes/remote-teammates.ts"; import { RemoteTeammates } from "./remote-teammates.ts"; import { createRemoteHandoff, isRemoteBotId } from "./host/remote-teammate-handoff.ts";
+import { createTicketRoutes } from "./routes/tickets.ts"; import { TicketEngine } from "./tickets/engine.ts";
 import { withScopeHint } from "./connector-scope-hint.ts"; import { accountsByApp, withAccountHint } from "./connector-account-hint.ts";
 import { connectorFileDeps, connectorFileScope, prepareConnectorFiles, withMissingFileHint } from "./connector-files.ts";
 import { createConnectorCards } from "./host/connector-cards.ts";
@@ -9350,10 +9351,18 @@ async function undoAppliedChange(res: ServerResponse, threadId: string, requestI
   json(res, 200, { ok: true, undone: true, ...(result.state === "already_undone" ? { alreadyUndone: true } : {}) });
 }
 
+const tickets = new TicketEngine({ dbPath: join(DATA_DIR, "tickets.sqlite") });
 const webhooks = new WebhookManager({
   emit: (event) => { broadcast(event); starterRoutineWake?.emitted(event); },
   botState: unattendedDispatchState,
-  enqueue: (input) => { const capped = usageCapGate.refusal(input.botId, input.byPerson === true, threadLanguage(store.bot(input.botId)?.threadId ?? "")); if (capped) throw Object.assign(new Error(capped), { status: 429, code: USAGE_CAP_CODE }); return routines!.enqueueWebhook(input); },
+  enqueue: (input) => {
+    if (input.byPerson !== true) {
+      try { tickets.intakeExternalWebhook(input); } catch (error) { console.error("tickets: webhook observe intake failed", error); }
+    }
+    const capped = usageCapGate.refusal(input.botId, input.byPerson === true, threadLanguage(store.bot(input.botId)?.threadId ?? ""));
+    if (capped) throw Object.assign(new Error(capped), { status: 429, code: USAGE_CAP_CODE });
+    return routines!.enqueueWebhook(input);
+  },
   findRun: (webhookId, deliveryId) => routines!.webhookRunReceipt(webhookId, deliveryId),
   cancelQueued: (webhookId, message) => routines!.cancelQueuedWebhook(webhookId, message),
   pendingRuns: (webhookId) => routines!.activeWebhookRunCount(webhookId),
@@ -9396,7 +9405,7 @@ const webhookIngressStatus = () => ({
   baseUrl: webhookIngress?.baseUrl ?? `http://127.0.0.1:${WEBHOOK_PORT}`,
   ...(webhookIngressError ? { error: webhookIngressError } : {}),
 });
-ROUTES.push(createTeamFilesRoutes({ files: teamFilesHost.files, actor: (auth) => auth.kind === "session" && auth.session.email ? { person: personKey(auth.session), admin: auth.scopes.includes("admin") } : null, personName: (person) => teamHost.personName(person), botName: (botId) => store.bot(botId)?.name })); ROUTES.push(createWebhookRoutes({ webhooks, ingress: webhookIngressStatus, visible: (auth) => visibleTo(viewerFor(auth)) }), botApi.routes, createRemoteTeammateRoutes({ teammates: remoteTeammates }));
+ROUTES.push(createTeamFilesRoutes({ files: teamFilesHost.files, actor: (auth) => auth.kind === "session" && auth.session.email ? { person: personKey(auth.session), admin: auth.scopes.includes("admin") } : null, personName: (person) => teamHost.personName(person), botName: (botId) => store.bot(botId)?.name })); ROUTES.push(createWebhookRoutes({ webhooks, ingress: webhookIngressStatus, visible: (auth) => visibleTo(viewerFor(auth)) }), createTicketRoutes({ tickets }), botApi.routes, createRemoteTeammateRoutes({ teammates: remoteTeammates }));
 
 const RUNTIME_KEEP_MS = 30 * 24 * 60 * 60_000;
 let runtimePrunedAt = 0;
@@ -15225,6 +15234,7 @@ const gracefulShutdown = createGracefulShutdown({
       cacheKeepWarm.dispose(); warmSummaries.dispose();
       skillReview.stop();
       webhookIngress?.server.close(); webhookIngress?.socketServer?.close();
+      tickets.close();
       tunnelListener?.close(); void tailnetShare.close(); phoneRelay?.stop(); stopCloudHomeConnectedApps();
     },
     () => phoneScreen.closeAll(),
