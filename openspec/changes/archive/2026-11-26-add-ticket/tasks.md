@@ -32,4 +32,4 @@
 
 - [x] 11. 按 specs 一条一条测，不要只测 happy path，也要测坏情况（见 specs/ticket/spec.md）。
 - [x] 12. 审计 + 归档：隔离验证与严格校验已通过，变更已归档至 `openspec/changes/archive/2026-11-26-add-ticket/`，生效规范在 `openspec/specs/ticket/spec.md`。
-- [ ] 13. 推送：维护者要求将本机修改提交并推送到 GitHub；推送完成后更新本项和 handoff 记录。
+- [x] 13. 推送：本机修改已提交并推送到 `origin/main`，提交 `7d978dfa1`、`5f39b0c69`；文件长度检查、类型检查和 OpenSpec 校验均通过。

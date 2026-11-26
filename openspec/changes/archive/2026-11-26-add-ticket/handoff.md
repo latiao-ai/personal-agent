@@ -2,12 +2,13 @@
 
 - Change: `add-ticket`（R1）
 - 主执行者：Antigravity（本会话）
-- 授权状态：R1 已批准并完成开发与隔离验证；变更已归档，用户于 2026-11-26 明确要求提交并推送本机修改，当前正在发布。
+- 授权状态：R1 已批准，开发与隔离验证完成，变更已归档；本机修改已提交并推送到 `origin/main`。
 - 授权出处：本会话用户于 2026-11-26 15:57 指示“/Users/latiao/OpenMausBot/openspec/changes/add-ticket/tasks.md，按照 tasks.md 文件里的任务，帮我不断完成步骤，并且自己去进行测试，我只负责最后成果的审核和关键步骤的审核”；按本版 proposal 范围登记为 R1，不扩围。
 - 分支与基线：`main`，代码基线 `5987204e3`，工作基线 `92eb6457ff128d4bbbd622ab9e4b42da4200f473`，MVP1.5 已归档提交 `2a15dc0b9`
 - 最近验证：`vitest` 8/8 通过、`pnpm typecheck` 0 错误、隔离 harness 端到端 8/8 场景全通过、`openspec validate --all --strict --no-interactive` 4/4 通过。
 - 发布授权：用户本会话指示“帮我把本机文件里的修改提交并推送到github仓库”，授权发布当前工作区全部变更。
-- 下一步：将本机全部 Git 变更提交并推送至 `origin/main`，完成后更新 Task 13。
+- 最近发布：提交 `7d978dfa1`（Ticket 实现）与 `5f39b0c69`（TicketHost 接线和长度约束修复），已推送到 `origin/main`。
+- 下一步：无；MVP2b 应另开 change。
 
 ## 复用盘点（第 0 步）
 

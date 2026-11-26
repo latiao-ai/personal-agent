@@ -1,6 +1,6 @@
 # OpenMausBot 二次开发工作区
 
-项目目标是基于 OpenMausBot 开发个人助理。当前优先事项是审计 [开发工作区交接](changes/bootstrap-dev-workspace/handoff.md)，基线 `5987204e3`。[飞书网关 MVP1](changes/add-feishu-gateway/handoff.md) 已通过第 0 步隔离聊天验收，已选用「辣条」并核实飞书入站配置，凭据已保存，固定 Bot 私聊收发已验证，原有聊天、审批与连接器隔离回归通过。R2 验收修订已确认；另一个白名单外账号现场拒绝与服务器部署后的隔离网络恢复仍待验收。MVP1.5 租户架构决策已归档，后续实现另开 change。
+项目目标是基于 OpenMausBot 开发个人助理。当前优先事项是审计 [开发工作区交接](changes/bootstrap-dev-workspace/handoff.md)，基线 `5987204e3`。[飞书网关 MVP1](changes/add-feishu-gateway/handoff.md) 已通过第 0 步隔离聊天验收，已选用「辣条」并核实飞书入站配置，凭据已保存，固定 Bot 私聊收发已验证，原有聊天、审批与连接器隔离回归通过。R2 验收修订已确认；另一个白名单外账号现场拒绝与服务器部署后的隔离网络恢复仍待验收。MVP1.5 租户架构决策已归档；MVP2a Ticket 已完成隔离验证并归档，后续 MVP2b 另开 change。
 
 ## 查询进度
 
@@ -42,6 +42,7 @@ OpenSpec 的材料就绪、任务勾选与维护者的确认分别留证。实�
 ## 改动记录
 
 - 2026-11-26 · `decide-tenancy-architecture` 已归档；生效规范位于 `openspec/specs/tenancy-architecture/spec.md`。后续实现需另开 change。
+- 2026-11-26 · `add-ticket` 已完成 Ticket / Mandate 实现与隔离验证并归档；生效规范位于 `openspec/specs/ticket/spec.md`，后续审批流另开 change。
 - 2026-11-25 · 飞书网关 R1 已核对原版接入点并完成结构图。维护者已在 Mac 终端启动隔离实例，当前会话连接该实例时收到 EPERM，原版聊天回执待取得。
 - 2026-11-25 · 已核对原版聊天的发送、完成状态及同会话回复，下项为飞书应用配置。
 - 2026-11-25 · 维护者选用「辣条」。已核实长连接、接收消息事件和单聊读取权限，本地凭据录入脚本已通过隔离检查。
