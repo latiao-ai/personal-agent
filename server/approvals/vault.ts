@@ -34,6 +34,18 @@ export class ControlPlaneVault {
     return [...(this.tenantSecrets.get(tenantId)?.keys() ?? [])];
   }
 
+  /** Permanently removes all stored credentials and active surrogate tokens for a tenant on offboarding. */
+  purgeTenantSecrets(tenantId: string): number {
+    const count = this.tenantSecrets.get(tenantId)?.size ?? 0;
+    this.tenantSecrets.delete(tenantId);
+    for (const [token, record] of this.tokens) {
+      if (record.tenantId === tenantId) {
+        this.tokens.delete(token);
+      }
+    }
+    return count;
+  }
+
   /** Issues a short-lived surrogate token scoped to one ticket, tenant, tool list, and budget cap. */
   issueSurrogateToken(input: {
     tenantId: string;
