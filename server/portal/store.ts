@@ -5,15 +5,25 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   AdminAccount,
   AdminSession,
+  ChannelBinding,
+  ChannelBindingStatus,
+  ChannelPlatform,
   CoreSkillHashChangeRequest,
   CustomerSession,
   MemoryChangeSuggestion,
   PortalAuditEntry,
   PortalRole,
+  PortalUserAccount,
   QrChallengeStatus,
+  TenantChannelAllowlist,
   TenantMember,
   TenantScheduleConfig,
+  UserIdentity,
+  WeixinIdentity,
 } from "../../shared/portal.ts";
+import { PortalUnifiedStore, stripUserSecrets, type StoredPortalUserAccount } from "./unified-store.ts";
+
+export { stripUserSecrets, type StoredPortalUserAccount };
 
 export interface StoredQrChallenge {
   qrToken: string;
@@ -34,11 +44,13 @@ export interface StoredAdminAccount extends AdminAccount {
 export class PortalStore {
   readonly path: string;
   private readonly db: DatabaseSync;
+  private readonly unified: PortalUnifiedStore;
 
   constructor(filePath: string) {
     this.path = filePath;
     mkdirSync(dirname(filePath), { recursive: true });
     this.db = new DatabaseSync(filePath);
+    this.unified = new PortalUnifiedStore(this.db);
     try {
       chmodSync(filePath, 0o600);
     } catch {
@@ -172,7 +184,80 @@ export class PortalStore {
         at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_portal_audit_tenant ON portal_audit_log(tenant_id, at);
+
+      CREATE TABLE IF NOT EXISTS portal_users (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        salt TEXT NOT NULL,
+        role TEXT NOT NULL,
+        tenant_id TEXT,
+        tenant_role TEXT NOT NULL DEFAULT 'admin',
+        legacy_local INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        disabled_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_portal_users_tenant ON portal_users(tenant_id);
+
+      CREATE TABLE IF NOT EXISTS channel_bindings (
+        id TEXT PRIMARY KEY,
+        bot_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        platform_app_id TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        chat_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        label TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_channel_bindings_tenant ON channel_bindings(tenant_id);
+      CREATE INDEX IF NOT EXISTS idx_channel_bindings_lookup ON channel_bindings(platform, chat_id, status);
+      CREATE INDEX IF NOT EXISTS idx_channel_bindings_app ON channel_bindings(platform, platform_app_id, status);
+
+      CREATE TABLE IF NOT EXISTS user_identities (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        feishu_open_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(tenant_id, feishu_open_id),
+        UNIQUE(user_id, tenant_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_user_identities_feishu ON user_identities(feishu_open_id);
+
+      CREATE TABLE IF NOT EXISTS weixin_identities (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        weixin_open_id TEXT NOT NULL,
+        ilink_account_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(tenant_id, weixin_open_id),
+        UNIQUE(user_id, tenant_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_weixin_identities_open ON weixin_identities(weixin_open_id);
+
+      CREATE TABLE IF NOT EXISTS tenant_channel_allowlists (
+        tenant_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        allowed_sender_ids_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        updated_by TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, platform)
+      );
     `);
+
+    for (const column of ["user_id TEXT", "username TEXT"]) {
+      try {
+        this.db.exec(`ALTER TABLE customer_sessions ADD COLUMN ${column}`);
+      } catch {
+        // Column already exists on migrated databases.
+      }
+    }
   }
 
   close(): void {
@@ -277,8 +362,8 @@ export class PortalStore {
     this.db
       .prepare(
         `INSERT INTO customer_sessions (
-          token_hash, session_id, tenant_id, open_id, display_name, role, created_at, expires_at, revoked_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+          token_hash, session_id, tenant_id, open_id, display_name, role, user_id, username, created_at, expires_at, revoked_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
       )
       .run(
         tokenHash,
@@ -287,6 +372,8 @@ export class PortalStore {
         session.openId,
         session.displayName,
         session.role,
+        session.userId ?? null,
+        session.username ?? null,
         session.createdAt,
         session.expiresAt,
       );
@@ -303,10 +390,18 @@ export class PortalStore {
       openId: String(row.open_id),
       displayName: String(row.display_name),
       role: row.role as PortalRole,
+      ...(row.user_id ? { userId: String(row.user_id) } : {}),
+      ...(row.username ? { username: String(row.username) } : {}),
       createdAt: Number(row.created_at),
       expiresAt: Number(row.expires_at),
       revokedAt: row.revoked_at !== null && row.revoked_at !== undefined ? Number(row.revoked_at) : null,
     };
+  }
+
+  revokeCustomerSessionsByUserId(userId: string, revokedAt: number): void {
+    this.db
+      .prepare(`UPDATE customer_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`)
+      .run(revokedAt, userId);
   }
 
   revokeCustomerSession(tokenHash: string, revokedAt: number): void {
@@ -408,6 +503,12 @@ export class PortalStore {
 
   revokeAdminSession(tokenHash: string, revokedAt: number): void {
     this.db.prepare(`UPDATE admin_sessions SET revoked_at = ? WHERE token_hash = ?`).run(revokedAt, tokenHash);
+  }
+
+  revokeAdminSessionsByAdminId(adminId: string, revokedAt: number): void {
+    this.db
+      .prepare(`UPDATE admin_sessions SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL`)
+      .run(revokedAt, adminId);
   }
 
   // --- Bot Enable/Disable States ---
@@ -642,6 +743,29 @@ export class PortalStore {
       at: Number(row.at),
     }));
   }
+
+  // --- Unified Portal Users, Channel Bindings, Identities & Allowlists ---
+
+  insertPortalUser(user: StoredPortalUserAccount): void { this.unified.insertPortalUser(user); }
+  getPortalUserByUsername(username: string): StoredPortalUserAccount | null { return this.unified.getPortalUserByUsername(username); }
+  getPortalUserById(id: string): StoredPortalUserAccount | null { return this.unified.getPortalUserById(id); }
+  listPortalUsers(): PortalUserAccount[] { return this.unified.listPortalUsers(); }
+  updatePortalUserPassword(id: string, passwordHash: string, salt: string, updatedAt: number): boolean { return this.unified.updatePortalUserPassword(id, passwordHash, salt, updatedAt); }
+  disablePortalUser(id: string, disabledAt: number): boolean { return this.unified.disablePortalUser(id, disabledAt); }
+  insertChannelBinding(binding: ChannelBinding): void { this.unified.insertChannelBinding(binding); }
+  getChannelBinding(id: string): ChannelBinding | null { return this.unified.getChannelBinding(id); }
+  findActiveChannelBinding(platform: ChannelPlatform, chatId: string): ChannelBinding | null { return this.unified.findActiveChannelBinding(platform, chatId); }
+  listActiveChannelBindingsByApp(platform: ChannelPlatform, platformAppId: string): ChannelBinding[] { return this.unified.listActiveChannelBindingsByApp(platform, platformAppId); }
+  listChannelBindings(filter?: { tenantId?: string; botId?: string; status?: ChannelBindingStatus }): ChannelBinding[] { return this.unified.listChannelBindings(filter); }
+  setChannelBindingStatus(id: string, status: ChannelBindingStatus, updatedAt: number): boolean { return this.unified.setChannelBindingStatus(id, status, updatedAt); }
+  upsertFeishuIdentity(identity: UserIdentity): void { this.unified.upsertFeishuIdentity(identity); }
+  findFeishuIdentity(tenantId: string, feishuOpenId: string): UserIdentity | null { return this.unified.findFeishuIdentity(tenantId, feishuOpenId); }
+  listFeishuIdentities(tenantId: string): UserIdentity[] { return this.unified.listFeishuIdentities(tenantId); }
+  upsertWeixinIdentity(identity: WeixinIdentity): void { this.unified.upsertWeixinIdentity(identity); }
+  findWeixinIdentity(tenantId: string, weixinOpenId: string): WeixinIdentity | null { return this.unified.findWeixinIdentity(tenantId, weixinOpenId); }
+  listWeixinIdentities(tenantId: string): WeixinIdentity[] { return this.unified.listWeixinIdentities(tenantId); }
+  getTenantChannelAllowlist(tenantId: string, platform: ChannelPlatform): TenantChannelAllowlist | null { return this.unified.getTenantChannelAllowlist(tenantId, platform); }
+  setTenantChannelAllowlist(allowlist: TenantChannelAllowlist): void { this.unified.setTenantChannelAllowlist(allowlist); }
 }
 
 function rowToMember(row: Record<string, unknown>): TenantMember {

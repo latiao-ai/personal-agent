@@ -32,8 +32,82 @@ export interface CustomerSession {
   openId: string;
   displayName: string;
   role: PortalRole;
+  userId?: string;
+  username?: string;
   createdAt: number;
   expiresAt: number;
+}
+
+export type UnifiedAccountRole = "customer" | "ops_admin";
+
+export interface PortalUserAccount {
+  id: string;
+  username: string;
+  displayName: string;
+  role: UnifiedAccountRole;
+  tenantId: string | null;
+  tenantRole: PortalRole;
+  legacyLocalAccount: boolean;
+  createdAt: number;
+  updatedAt: number;
+  disabledAt: number | null;
+}
+
+export type UnifiedLoginResult =
+  | {
+      kind: "customer";
+      redirectTo: "/portal";
+      token: string;
+      session: CustomerSession;
+    }
+  | {
+      kind: "admin";
+      redirectTo: "/admin";
+      token: string;
+      session: AdminSession;
+    };
+
+export type ChannelPlatform = "feishu" | "weixin";
+export type ChannelChatType = "p2p" | "group";
+export type ChannelBindingStatus = "active" | "disabled";
+
+export interface ChannelBinding {
+  id: string;
+  botId: string;
+  tenantId: string;
+  platform: ChannelPlatform;
+  platformAppId: string;
+  chatId: string;
+  chatType: ChannelChatType;
+  status: ChannelBindingStatus;
+  label: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface UserIdentity {
+  id: string;
+  userId: string;
+  tenantId: string;
+  feishuOpenId: string;
+  createdAt: number;
+}
+
+export interface WeixinIdentity {
+  id: string;
+  userId: string;
+  tenantId: string;
+  weixinOpenId: string;
+  ilinkAccountId: string;
+  createdAt: number;
+}
+
+export interface TenantChannelAllowlist {
+  tenantId: string;
+  platform: ChannelPlatform;
+  allowedSenderIds: string[];
+  updatedAt: number;
+  updatedBy: string;
 }
 
 export interface AdminAccount {

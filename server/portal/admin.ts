@@ -22,12 +22,12 @@ export function hashPortalToken(raw: string): string {
   return createHash("sha256").update(raw).digest("hex");
 }
 
-function hashPassword(password: string, salt: string): string {
+export function hashPortalPassword(password: string, salt: string): string {
   return scryptSync(password, salt, 32).toString("hex");
 }
 
-function verifyPassword(password: string, salt: string, expectedHex: string): boolean {
-  const actual = Buffer.from(hashPassword(password, salt), "hex");
+export function verifyPortalPassword(password: string, salt: string, expectedHex: string): boolean {
+  const actual = Buffer.from(hashPortalPassword(password, salt), "hex");
   const expected = Buffer.from(expectedHex, "hex");
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
@@ -62,7 +62,7 @@ export class PortalAdminOps {
       id: `adm_${randomUUID()}`,
       username,
       displayName,
-      passwordHash: hashPassword(password, salt),
+      passwordHash: hashPortalPassword(password, salt),
       salt,
       createdAt: this.deps.now(),
       revokedAt: null,
@@ -108,7 +108,7 @@ export class PortalAdminOps {
 
   loginAdmin(username: string, password: string): { token: string; session: AdminSession } {
     const account = this.deps.store.getAdminByUsername(username);
-    if (!account || account.revokedAt !== null || !verifyPassword(password, account.salt, account.passwordHash)) {
+    if (!account || account.revokedAt !== null || !verifyPortalPassword(password, account.salt, account.passwordHash)) {
       this.deps.throwError(401, "invalid_admin_credentials", "管理员账号不存在、已吊销或密码错误");
     }
     const now = this.deps.now();

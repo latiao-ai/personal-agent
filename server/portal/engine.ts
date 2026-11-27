@@ -9,6 +9,8 @@ import type {
   AdminOffboardResult,
   AdminSession,
   AdminTenantOverview,
+  ChannelBinding,
+  ChannelPlatform,
   CoreSkillHashChangeRequest,
   CustomerSelfExport,
   CustomerSession,
@@ -19,10 +21,15 @@ import type {
   PortalMemorySkillView,
   PortalRole,
   PortalSpendOverview,
+  PortalUserAccount,
   QrLoginChallenge,
+  TenantChannelAllowlist,
   TenantMember,
   TenantPortalSettings,
   TenantScheduleConfig,
+  UnifiedLoginResult,
+  UserIdentity,
+  WeixinIdentity,
 } from "../../shared/portal.ts";
 import type { Ticket } from "../../shared/tickets.ts";
 import { formatApprovalStatusBanner, type ApprovalCardEvent, type ApprovalEngine } from "../approvals/engine.ts";
@@ -33,6 +40,7 @@ import type { PatrolEngine } from "../patrol/engine.ts";
 import type { TicketEngine } from "../tickets/engine.ts";
 import { hashPortalToken, PortalAdminOps } from "./admin.ts";
 import { PortalStore } from "./store.ts";
+import { PortalUnifiedOps } from "./unified.ts";
 
 const QR_CHALLENGE_TTL_MS = 5 * 60_000;
 const CUSTOMER_SESSION_TTL_MS = 24 * 60 * 60_000;
@@ -75,7 +83,9 @@ export class PortalEngine {
   private readonly now: () => number;
   private readonly qrBaseUrl: string;
   private readonly adminOps: PortalAdminOps;
+  private readonly unifiedOps: PortalUnifiedOps;
   private readonly feishuSyncListeners = new Set<(event: ApprovalCardEvent) => void>();
+  private readonly bindingChangeListeners = new Set<() => void>();
   private readonly unsubscribeApprovals: () => void;
 
   constructor(options: PortalEngineOptions) {
@@ -95,6 +105,27 @@ export class PortalEngine {
       now: this.now,
       registerTenantMember: (i) => this.registerTenantMember(i),
       recordAudit: (e) => this.recordAudit(e),
+      throwError: (s, c, m) => {
+        throw new PortalError(s, c, m);
+      },
+    });
+    this.unifiedOps = new PortalUnifiedOps({
+      store: this.store,
+      approvals: this.approvals,
+      isolation: this.isolation,
+      now: this.now,
+      loginAdminAccount: (u, p) => this.adminOps.loginAdmin(u, p),
+      registerTenantMember: (i) => this.registerTenantMember(i),
+      recordAudit: (e) => this.recordAudit(e),
+      onBindingsChanged: () => {
+        for (const listener of this.bindingChangeListeners) {
+          try {
+            listener();
+          } catch {
+            // Non-fatal gateway hot-reload listener error.
+          }
+        }
+      },
       throwError: (s, c, m) => {
         throw new PortalError(s, c, m);
       },
@@ -291,6 +322,8 @@ export class PortalEngine {
       openId: session.openId,
       displayName: session.displayName,
       role: session.role,
+      ...(session.userId ? { userId: session.userId } : {}),
+      ...(session.username ? { username: session.username } : {}),
       createdAt: session.createdAt,
       expiresAt: session.expiresAt,
     };
@@ -911,4 +944,27 @@ export class PortalEngine {
   listAllApprovals(tenantId?: string, limit = 200): PortalApprovalView[] {
     return this.adminOps.listAllApprovals(tenantId, limit);
   }
+
+  // ===========================================================================
+  // 8. Unified Login, Admin-Managed Users, Identity & Channel Bindings
+  // ===========================================================================
+
+  onChannelBindingsChanged(listener: () => void): () => void {
+    this.bindingChangeListeners.add(listener);
+    return () => { this.bindingChangeListeners.delete(listener); };
+  }
+  loginUnified(username: string, password: string): UnifiedLoginResult { return this.unifiedOps.loginUnified(username, password); }
+  createPortalUserAsAdmin(actor: AdminSession, input: Parameters<PortalUnifiedOps["createUserAsAdmin"]>[1]) { return this.unifiedOps.createUserAsAdmin(actor, input); }
+  listPortalUsers(): PortalUserAccount[] { return this.store.listPortalUsers(); }
+  changePortalUserPasswordAsAdmin(actor: AdminSession, userId: string, newPassword: string): { ok: true } { return this.unifiedOps.changeUserPasswordAsAdmin(actor, userId, newPassword); }
+  disablePortalUserAsAdmin(actor: AdminSession, userId: string): { ok: true } { return this.unifiedOps.disableUserAsAdmin(actor, userId); }
+  bindFeishuIdentity(session: CustomerSession, feishuOpenId: string): UserIdentity { return this.unifiedOps.bindFeishuIdentity(session, feishuOpenId); }
+  listFeishuIdentities(session: CustomerSession, requestedTenantId?: string | null): UserIdentity[] { this.assertTenantScope(session, requestedTenantId, "user_identity"); return this.store.listFeishuIdentities(session.tenantId); }
+  bindWeixinIdentity(session: CustomerSession, input: { weixinOpenId: string; ilinkAccountId: string }): WeixinIdentity { return this.unifiedOps.bindWeixinIdentity(session, input); }
+  listWeixinIdentities(session: CustomerSession, requestedTenantId?: string | null): WeixinIdentity[] { this.assertTenantScope(session, requestedTenantId, "weixin_identity"); return this.store.listWeixinIdentities(session.tenantId); }
+  createChannelBinding(session: CustomerSession, input: Parameters<PortalUnifiedOps["createChannelBinding"]>[1]): { binding: ChannelBinding; disabledDuplicateBindingIds: string[] } { return this.unifiedOps.createChannelBinding(session, input); }
+  unbindChannelBinding(session: CustomerSession, bindingId: string): ChannelBinding { return this.unifiedOps.unbindChannelBinding(session, bindingId); }
+  listChannelBindings(session: CustomerSession, options?: { botId?: string; requestedTenantId?: string | null }): ChannelBinding[] { this.assertTenantScope(session, options?.requestedTenantId, "channel_binding"); return this.store.listChannelBindings({ tenantId: session.tenantId, botId: options?.botId }); }
+  getTenantChannelAllowlist(session: CustomerSession, platform: ChannelPlatform, requestedTenantId?: string | null): TenantChannelAllowlist { this.assertTenantScope(session, requestedTenantId, "channel_allowlist"); return this.unifiedOps.getTenantAllowlist(session.tenantId, platform); }
+  setTenantChannelAllowlist(session: CustomerSession, platform: ChannelPlatform, allowedSenderIds: string[], requestedTenantId?: string | null): TenantChannelAllowlist { this.assertTenantScope(session, requestedTenantId, "channel_allowlist"); this.assertCustomerAdmin(session, "set_channel_allowlist"); return this.unifiedOps.setTenantAllowlist(session, platform, allowedSenderIds); }
 }

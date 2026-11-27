@@ -1,11 +1,65 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 
+import type { ChannelGatewayEngine } from "../gateway/engine.ts";
+import { WeixinAdapter } from "../gateway/adapters.ts";
 import { PortalError, type PortalEngine } from "../portal/engine.ts";
 import { PASS, type RouteContext, type RouteHandler } from "./table.ts";
 
 export const PORTAL_SESSION_COOKIE = "omb_portal_session";
 export const ADMIN_SESSION_COOKIE = "omb_admin_session";
+
+const unifiedLoginSchema = z.object({
+  username: z.string().min(1),
+  password: z.string().min(1),
+  cookie: z.boolean().optional(),
+});
+
+const adminCreateUserSchema = z.object({
+  username: z.string().min(1),
+  password: z.string().min(6),
+  displayName: z.string().min(1).optional(),
+  role: z.enum(["customer", "ops_admin"]),
+  tenantId: z.string().min(1).optional(),
+  tenantRole: z.enum(["admin", "member"]).optional(),
+  legacyLocalAccount: z.boolean().optional(),
+  autoSwitchSession: z.boolean().optional(),
+});
+
+const adminChangePasswordSchema = z.object({
+  password: z.string().min(6),
+});
+
+const channelBindingCreateSchema = z.object({
+  botId: z.string().min(1),
+  platform: z.enum(["feishu", "weixin"]),
+  platformAppId: z.string().min(1),
+  platformSecret: z.string().optional(),
+  chatId: z.string().min(1),
+  chatType: z.enum(["p2p", "group"]),
+  label: z.string().optional(),
+  forceReplaceDuplicateCredential: z.boolean().optional(),
+});
+
+const allowlistPutSchema = z.object({
+  platform: z.enum(["feishu", "weixin"]),
+  allowedSenderIds: z.array(z.string().min(1)),
+  tenantId: z.string().min(1).optional(),
+});
+
+const feishuIdentitySchema = z.object({
+  feishuOpenId: z.string().min(1),
+});
+
+const weixinIdentitySchema = z.object({
+  weixinOpenId: z.string().min(1),
+  ilinkAccountId: z.string().min(1),
+});
+
+const weixinQrConfirmSchema = z.object({
+  sessionId: z.string().min(1),
+  ilinkAccountId: z.string().min(1).optional(),
+});
 
 const qrConfirmSchema = z.object({
   qrToken: z.string().min(1),
@@ -139,33 +193,153 @@ function extractToken(req: IncomingMessage, cookieName: string, url?: URL): stri
   return cookies.get(cookieName) ?? null;
 }
 
+function formatSetCookie(name: string, value: string, maxAgeSeconds: number): string {
+  return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}`;
+}
+
+function formatClearCookie(name: string): string {
+  return `${name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+}
+
 function setSessionCookie(res: ServerResponse, name: string, value: string, maxAgeSeconds: number): void {
-  res.setHeader(
-    "set-cookie",
-    `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}`,
-  );
+  res.setHeader("set-cookie", formatSetCookie(name, value, maxAgeSeconds));
 }
 
 function clearSessionCookie(res: ServerResponse, name: string): void {
-  res.setHeader("set-cookie", `${name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
-}
-
-export interface PortalRouteDeps {
-  portal: PortalEngine;
+  res.setHeader("set-cookie", formatClearCookie(name));
 }
 
 /**
- * HTTP routes for Customer Web Portal (`/api/portal/*`) and Admin Console (`/api/admin/*`).
- * Self-authenticating so remote browsers (mobile/iPad/desktop) can authenticate directly
- * via Feishu QR (customers) or separate admin credentials (operators) without desktop pairing.
+ * Server-side route guard for `/portal` and `/admin` HTML pages.
+ * Runs before static SPA serving: unauthenticated requests redirect to `/login`;
+ * mismatched roles redirect to their own destination page (or 403 for JSON callers).
  */
-export function createPortalRoutes({ portal }: PortalRouteDeps): RouteHandler {
+export function handlePortalPageGuard(
+  req: IncomingMessage,
+  res: ServerResponse,
+  path: string,
+  portal: PortalEngine,
+): boolean {
+  const isPortal = path === "/portal" || path.startsWith("/portal/");
+  const isAdmin = path === "/admin" || path.startsWith("/admin/");
+  if (!isPortal && !isAdmin) return false;
+
+  const cookies = parseCookieHeader(req.headers.cookie);
+  const custSession = portal.authenticateCustomer(cookies.get(PORTAL_SESSION_COOKIE));
+  const adminSession = portal.authenticateAdmin(cookies.get(ADMIN_SESSION_COOKIE));
+  const wantsJson = String(req.headers.accept ?? "").includes("application/json");
+
+  if (isPortal) {
+    if (custSession) return false;
+    if (adminSession) {
+      res.writeHead(302, { location: "/admin", "cache-control": "no-store" });
+      res.end();
+      return true;
+    }
+    res.writeHead(302, { location: `/login?next=${encodeURIComponent(path)}`, "cache-control": "no-store" });
+    res.end();
+    return true;
+  }
+
+  // isAdmin
+  if (adminSession) return false;
+  if (custSession) {
+    if (wantsJson) {
+      res.writeHead(403, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+      res.end(JSON.stringify({ error: "customer_forbidden_on_admin", message: "客户账号无权访问管理后台" }));
+      return true;
+    }
+    res.writeHead(302, { location: "/portal", "cache-control": "no-store" });
+    res.end();
+    return true;
+  }
+  res.writeHead(302, { location: `/login?next=${encodeURIComponent(path)}`, "cache-control": "no-store" });
+  res.end();
+  return true;
+}
+
+const UNIFIED_AUTH_PATHS = new Set([
+  "/api/auth/login",
+  "/api/auth/me",
+  "/api/auth/logout",
+  "/api/auth/register",
+]);
+
+export interface PortalRouteDeps {
+  portal: PortalEngine;
+  gateway?: ChannelGatewayEngine;
+}
+
+/**
+ * HTTP routes for Unified Auth (`/api/auth/login|me|logout|register`),
+ * Customer Web Portal (`/api/portal/*`), and Admin Console (`/api/admin/*`).
+ */
+export function createPortalRoutes({ portal, gateway }: PortalRouteDeps): RouteHandler {
   return async ({ req, res, path, method, url, json, readBody }: RouteContext) => {
-    if (!path.startsWith("/api/portal/") && !path.startsWith("/api/admin/")) {
+    const isUnifiedAuth = UNIFIED_AUTH_PATHS.has(path);
+    if (!isUnifiedAuth && !path.startsWith("/api/portal/") && !path.startsWith("/api/admin/")) {
       return PASS;
     }
 
     try {
+      // =====================================================================
+      // Unified Login Entry (`/api/auth/login`, `/api/auth/me`, `/api/auth/logout`)
+      // Self-registration is explicitly disabled (403).
+      // =====================================================================
+      if ((path === "/api/auth/register" || path === "/api/portal/auth/register") && method === "POST") {
+        return json(res, 403, {
+          error: "self_registration_disabled",
+          message: "不开放自助注册，请联系管理员在管理后台创建账号",
+        });
+      }
+
+      if (path === "/api/auth/login" && method === "POST") {
+        const parsed = unifiedLoginSchema.safeParse(await readBody(req));
+        if (!parsed.success) {
+          return json(res, 400, { error: "invalid_login_payload", issues: parsed.error.issues });
+        }
+        const result = portal.loginUnified(parsed.data.username, parsed.data.password);
+        if (parsed.data.cookie !== false) {
+          if (result.kind === "admin") {
+            res.setHeader("set-cookie", [
+              formatSetCookie(ADMIN_SESSION_COOKIE, result.token, 8 * 60 * 60),
+              formatClearCookie(PORTAL_SESSION_COOKIE),
+            ]);
+          } else {
+            res.setHeader("set-cookie", [
+              formatSetCookie(PORTAL_SESSION_COOKIE, result.token, 24 * 60 * 60),
+              formatClearCookie(ADMIN_SESSION_COOKIE),
+            ]);
+          }
+        }
+        return json(res, 200, result);
+      }
+
+      if (path === "/api/auth/me" && method === "GET") {
+        const adminTok = extractToken(req, ADMIN_SESSION_COOKIE);
+        const adminSession = portal.authenticateAdmin(adminTok);
+        if (adminSession) {
+          return json(res, 200, { authenticated: true, kind: "admin", redirectTo: "/admin", session: adminSession });
+        }
+        const custTok = extractToken(req, PORTAL_SESSION_COOKIE);
+        const custSession = portal.authenticateCustomer(custTok);
+        if (custSession) {
+          return json(res, 200, { authenticated: true, kind: "customer", redirectTo: "/portal", session: custSession });
+        }
+        return json(res, 401, { authenticated: false, error: "unauthenticated", message: "请先登录" });
+      }
+
+      if (path === "/api/auth/logout" && method === "POST") {
+        const custTok = extractToken(req, PORTAL_SESSION_COOKIE);
+        const adminTok = extractToken(req, ADMIN_SESSION_COOKIE);
+        if (custTok) portal.logoutCustomer(custTok);
+        if (adminTok) portal.logoutAdmin(adminTok);
+        res.setHeader("set-cookie", [
+          formatClearCookie(PORTAL_SESSION_COOKIE),
+          formatClearCookie(ADMIN_SESSION_COOKIE),
+        ]);
+        return json(res, 200, { ok: true });
+      }
       // =====================================================================
       // Customer Portal Auth (Feishu QR only, no password)
       // =====================================================================
@@ -352,6 +526,101 @@ export function createPortalRoutes({ portal }: PortalRouteDeps): RouteHandler {
           return json(res, 200, { export: portal.exportCustomerData(session, requestedTenantId) });
         }
 
+        // Page 7: Messaging Platforms (Feishu + Personal WeChat iLink; WeCom not implemented)
+        if (path === "/api/portal/channels/bindings" && method === "GET") {
+          const botId = url.searchParams.get("botId") || undefined;
+          return json(res, 200, {
+            bindings: portal.listChannelBindings(session, { botId, requestedTenantId }),
+            gatewayStatus: gateway?.getHealthSnapshot() ?? null,
+            weixinNote: WeixinAdapter.GROUP_LIMITATION_NOTE,
+          });
+        }
+        if (path === "/api/portal/channels/bindings" && method === "POST") {
+          const raw = (await readBody(req)) as Record<string, unknown> | null;
+          if (raw?.platform === "wecom") {
+            return json(res, 501, {
+              error: "wecom_not_implemented",
+              message: "企业微信（WeCom）本次未接通，请使用飞书或个人微信",
+            });
+          }
+          const parsed = channelBindingCreateSchema.safeParse(raw);
+          if (!parsed.success) {
+            return json(res, 400, { error: "invalid_channel_binding", issues: parsed.error.issues });
+          }
+          const created = portal.createChannelBinding(session, parsed.data);
+          return json(res, 201, created);
+        }
+        const unbindMatch = /^\/api\/portal\/channels\/bindings\/([^/]+)$/.exec(path);
+        if (unbindMatch && method === "DELETE") {
+          const binding = portal.unbindChannelBinding(session, decodeURIComponent(unbindMatch[1]!));
+          return json(res, 200, { binding });
+        }
+
+        if (path === "/api/portal/channels/allowlist" && method === "GET") {
+          const platform = url.searchParams.get("platform") === "weixin" ? "weixin" : "feishu";
+          return json(res, 200, { allowlist: portal.getTenantChannelAllowlist(session, platform, requestedTenantId) });
+        }
+        if (path === "/api/portal/channels/allowlist" && method === "PUT") {
+          const parsed = allowlistPutSchema.safeParse(await readBody(req));
+          if (!parsed.success) {
+            return json(res, 400, { error: "invalid_allowlist", issues: parsed.error.issues });
+          }
+          const allowlist = portal.setTenantChannelAllowlist(
+            session,
+            parsed.data.platform,
+            parsed.data.allowedSenderIds,
+            parsed.data.tenantId,
+          );
+          return json(res, 200, { allowlist });
+        }
+
+        if (path === "/api/portal/channels/weixin/qr/start" && method === "POST") {
+          if (!gateway) {
+            return json(res, 503, { error: "gateway_unavailable", message: "常驻网关未启动" });
+          }
+          return json(res, 200, { qrSession: gateway.weixin.startIlinkQrLogin() });
+        }
+        if (path === "/api/portal/channels/weixin/qr/confirm" && method === "POST") {
+          if (!gateway) {
+            return json(res, 503, { error: "gateway_unavailable", message: "常驻网关未启动" });
+          }
+          const parsed = weixinQrConfirmSchema.safeParse(await readBody(req));
+          if (!parsed.success) {
+            return json(res, 400, { error: "invalid_weixin_qr_confirm", issues: parsed.error.issues });
+          }
+          const qrSession = gateway.weixin.confirmIlinkQrLogin(parsed.data.sessionId, parsed.data.ilinkAccountId);
+          return qrSession ? json(res, 200, { qrSession }) : json(res, 404, { error: "qr_session_not_found" });
+        }
+
+        if (path === "/api/portal/identities" && method === "GET") {
+          return json(res, 200, {
+            feishu: portal.listFeishuIdentities(session, requestedTenantId),
+            weixin: portal.listWeixinIdentities(session, requestedTenantId),
+          });
+        }
+        if (path === "/api/portal/identities/feishu" && method === "POST") {
+          const parsed = feishuIdentitySchema.safeParse(await readBody(req));
+          if (!parsed.success) {
+            return json(res, 400, { error: "invalid_feishu_identity", issues: parsed.error.issues });
+          }
+          return json(res, 201, { identity: portal.bindFeishuIdentity(session, parsed.data.feishuOpenId) });
+        }
+        if (path === "/api/portal/identities/weixin" && method === "POST") {
+          const parsed = weixinIdentitySchema.safeParse(await readBody(req));
+          if (!parsed.success) {
+            return json(res, 400, { error: "invalid_weixin_identity", issues: parsed.error.issues });
+          }
+          return json(res, 201, { identity: portal.bindWeixinIdentity(session, parsed.data) });
+        }
+
+        if (path === "/api/portal/gateway/logs" && method === "GET") {
+          const limit = Number(url.searchParams.get("limit") ?? 50);
+          return json(res, 200, {
+            status: gateway?.getHealthSnapshot() ?? null,
+            logs: gateway?.listLogs({ tenantId: session.tenantId, limit: Number.isFinite(limit) ? limit : 50 }) ?? [],
+          });
+        }
+
         return json(res, 404, { error: "portal_route_not_found" });
       }
 
@@ -492,6 +761,52 @@ export function createPortalRoutes({ portal }: PortalRouteDeps): RouteHandler {
       if (revokeAdminMatch && method === "POST") {
         const result = portal.revokeAdminAccount(adminSession, decodeURIComponent(revokeAdminMatch[1]!));
         return json(res, 200, result);
+      }
+
+      // Unified User Account Management (Admin-only, no self-registration)
+      if (path === "/api/admin/users" && method === "GET") {
+        return json(res, 200, { users: portal.listPortalUsers() });
+      }
+      if (path === "/api/admin/users" && method === "POST") {
+        const parsed = adminCreateUserSchema.safeParse(await readBody(req));
+        if (!parsed.success) {
+          return json(res, 400, { error: "invalid_user_payload", issues: parsed.error.issues });
+        }
+        const created = portal.createPortalUserAsAdmin(adminSession, parsed.data);
+        if (created.customerSession) {
+          res.setHeader("set-cookie", [
+            formatSetCookie(PORTAL_SESSION_COOKIE, created.customerSession.token, 24 * 60 * 60),
+            formatClearCookie(ADMIN_SESSION_COOKIE),
+          ]);
+        }
+        return json(res, 201, {
+          user: created.user,
+          autoRedirectTo: created.autoRedirectTo,
+          switchedToCustomerSession: Boolean(created.customerSession),
+        });
+      }
+      const userPassMatch = /^\/api\/admin\/users\/([^/]+)\/password$/.exec(path);
+      if (userPassMatch && method === "PATCH") {
+        const parsed = adminChangePasswordSchema.safeParse(await readBody(req));
+        if (!parsed.success) {
+          return json(res, 400, { error: "invalid_password_payload", issues: parsed.error.issues });
+        }
+        return json(
+          res,
+          200,
+          portal.changePortalUserPasswordAsAdmin(adminSession, decodeURIComponent(userPassMatch[1]!), parsed.data.password),
+        );
+      }
+      const userDisableMatch = /^\/api\/admin\/users\/([^/]+)\/disable$/.exec(path);
+      if (userDisableMatch && method === "POST") {
+        return json(res, 200, portal.disablePortalUserAsAdmin(adminSession, decodeURIComponent(userDisableMatch[1]!)));
+      }
+
+      if (path === "/api/admin/gateway/status" && method === "GET") {
+        return json(res, 200, {
+          status: gateway?.getHealthSnapshot() ?? null,
+          logs: gateway?.listLogs({ limit: 100 }) ?? [],
+        });
       }
 
       return json(res, 404, { error: "admin_route_not_found" });

@@ -1,0 +1,18 @@
+[Unit]
+Description=OpenMausBot Multi-Platform Resident Messaging Gateway (Feishu + Weixin iLink)
+After=network-online.target openmausbot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/openmausbot
+ExecStart=/usr/bin/node --experimental-strip-types scripts/gateway-daemon.ts
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/openmausbot
+
+[Install]
+WantedBy=multi-user.target

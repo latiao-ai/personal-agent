@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { KeyRound, LogOut, Plus, Server, ShieldCheck, Trash2, Users } from "lucide-react";
+import { KeyRound, LogOut, Plus, Server, Trash2, Users } from "lucide-react";
 
 import type {
   AdminAccount,
@@ -8,7 +8,9 @@ import type {
   AdminTenantOverview,
   CoreSkillHashChangeRequest,
   PortalAuditEntry,
+  PortalUserAccount,
 } from "../../shared/portal";
+import { AdminUsersSection } from "./AdminUsersSection";
 
 async function adminApi<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -26,8 +28,6 @@ async function adminApi<T>(path: string, init?: RequestInit): Promise<T> {
 export function AdminConsoleApp() {
   const [session, setSession] = useState<AdminSession | null>(null);
   const [checking, setChecking] = useState(true);
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [statusNote, setStatusNote] = useState<string | null>(null);
 
@@ -35,6 +35,7 @@ export function AdminConsoleApp() {
   const [coreRequests, setCoreRequests] = useState<CoreSkillHashChangeRequest[]>([]);
   const [audit, setAudit] = useState<PortalAuditEntry[]>([]);
   const [accounts, setAccounts] = useState<AdminAccount[]>([]);
+  const [portalUsers, setPortalUsers] = useState<PortalUserAccount[]>([]);
 
   // Provision form
   const [newTenantId, setNewTenantId] = useState("");
@@ -46,16 +47,18 @@ export function AdminConsoleApp() {
 
   const refreshAll = useCallback(async () => {
     try {
-      const [tRes, reqRes, audRes, accRes] = await Promise.all([
+      const [tRes, reqRes, audRes, accRes, usrRes] = await Promise.all([
         adminApi<{ tenants: AdminTenantOverview[] }>("/api/admin/tenants"),
         adminApi<{ requests: CoreSkillHashChangeRequest[] }>("/api/admin/core-skills/requests"),
         adminApi<{ audit: PortalAuditEntry[] }>("/api/admin/audit?limit=100"),
         adminApi<{ accounts: AdminAccount[] }>("/api/admin/accounts"),
+        adminApi<{ users: PortalUserAccount[] }>("/api/admin/users"),
       ]);
       setTenants(tRes.tenants);
       setCoreRequests(reqRes.requests);
       setAudit(audRes.audit);
       setAccounts(accRes.accounts);
+      setPortalUsers(usrRes.users);
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : "加载管理后台数据失败");
     }
@@ -64,7 +67,10 @@ export function AdminConsoleApp() {
   useEffect(() => {
     void adminApi<{ session: AdminSession }>("/api/admin/auth/me")
       .then((res) => setSession(res.session))
-      .catch(() => setSession(null))
+      .catch(() => {
+        setSession(null);
+        window.location.replace("/login");
+      })
       .finally(() => setChecking(false));
   }, []);
 
@@ -72,24 +78,10 @@ export function AdminConsoleApp() {
     if (session) void refreshAll();
   }, [session, refreshAll]);
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorBanner(null);
-    try {
-      const res = await adminApi<{ session: AdminSession }>("/api/admin/auth/login", {
-        method: "POST",
-        body: JSON.stringify({ username, password, cookie: true }),
-      });
-      setSession(res.session);
-      setPassword("");
-    } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : "登录失败");
-    }
-  };
-
   const handleLogout = async () => {
-    await adminApi("/api/admin/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
+    await adminApi("/api/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
     setSession(null);
+    window.location.replace("/login");
   };
 
   const handleProvision = async (e: React.FormEvent) => {
@@ -172,45 +164,7 @@ export function AdminConsoleApp() {
   if (!session) {
     return (
       <div className="min-h-screen bg-app text-ink flex items-center justify-center p-6">
-        <form onSubmit={(e) => void handleLogin(e)} className="w-full max-w-sm rounded-xl border border-hairline bg-card p-6 space-y-4">
-          <div className="flex items-center gap-2.5">
-            <ShieldCheck className="w-5 h-5 text-ink" aria-hidden="true" />
-            <div>
-              <h1 className="text-[20px] font-semibold tracking-[-0.01em]">运营管理后台</h1>
-              <p className="text-[12px] text-ink-tertiary">独立管理员账号登录（与客户飞书扫码隔离）</p>
-            </div>
-          </div>
-          {errorBanner && (
-            <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-[13px] text-danger">
-              {errorBanner}
-            </div>
-          )}
-          <label className="block space-y-1 text-[12px] text-ink-secondary">
-            <span>管理员用户名</span>
-            <input
-              required
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              className="w-full rounded-lg border border-hairline bg-inset px-3 py-2 text-[13px] text-ink"
-            />
-          </label>
-          <label className="block space-y-1 text-[12px] text-ink-secondary">
-            <span>密码</span>
-            <input
-              required
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-lg border border-hairline bg-inset px-3 py-2 text-[13px] text-ink"
-            />
-          </label>
-          <button
-            type="submit"
-            className="w-full rounded-full bg-ink text-app py-2 text-[13px] font-medium"
-          >
-            登录管理后台
-          </button>
-        </form>
+        <span className="text-[13px] text-ink-secondary">正在跳转到统一登录页…</span>
       </div>
     );
   }
@@ -373,6 +327,20 @@ export function AdminConsoleApp() {
           </div>
         )}
       </section>
+
+      {/* Unified User Accounts */}
+      <AdminUsersSection
+        users={portalUsers}
+        onRefresh={refreshAll}
+        onNotify={(msg) => {
+          setErrorBanner(null);
+          setStatusNote(msg);
+        }}
+        onError={(msg) => {
+          setStatusNote(null);
+          setErrorBanner(msg);
+        }}
+      />
 
       {/* Admin Accounts */}
       <section className="space-y-3">

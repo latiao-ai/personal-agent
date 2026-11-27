@@ -34,12 +34,13 @@ const pageLanguage = loadPageLanguage();
 
 // The app is its own chunk, so these pages don't parse it. Everywhere else its fetch starts now, alongside the session
 // read, instead of after it. A failed fetch renders as a throw, so PageBoundary offers a reload.
-const PAGES_WITHOUT_THE_APP = new Set(["/home", "/pair", "/desktop-viewer", "/portal", "/admin"]);
+const PAGES_WITHOUT_THE_APP = new Set(["/home", "/pair", "/desktop-viewer", "/login", "/portal", "/admin"]);
+const isLoginPath = (pathname: string) => pathname === "/login" || pathname.startsWith("/login/");
 const isPortalPath = (pathname: string) => pathname === "/portal" || pathname.startsWith("/portal/");
 const isAdminPath = (pathname: string) => pathname === "/admin" || pathname.startsWith("/admin/");
 const loadApp = () => import("./App").catch((error: unknown) => ({ default: (): never => { throw error; } }));
 const appPage =
-  PAGES_WITHOUT_THE_APP.has(location.pathname) || isPortalPath(location.pathname) || isAdminPath(location.pathname)
+  PAGES_WITHOUT_THE_APP.has(location.pathname) || isLoginPath(location.pathname) || isPortalPath(location.pathname) || isAdminPath(location.pathname)
     ? null
     : loadApp();
 if (appPage) startDesktopLaunchMarks();
@@ -49,6 +50,10 @@ const teamName = () => serverFetch("/.well-known/openmausbot/environment").then(
   .then((descriptor) => (descriptor.capabilities?.cloudTeam === true && typeof descriptor.label === "string" ? descriptor.label : null), () => null);
 
 async function chooseRoot(): Promise<React.ReactNode> {
+  if (isLoginPath(location.pathname)) {
+    const { UnifiedLoginPage } = await import("./login/UnifiedLoginPage");
+    return <UnifiedLoginPage />;
+  }
   if (isPortalPath(location.pathname)) {
     const { CustomerPortalApp } = await import("./portal/CustomerPortalApp");
     return <CustomerPortalApp />;

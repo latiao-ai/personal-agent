@@ -12450,7 +12450,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       return;
     }
     // Two public routes come first; everything else needs the loopback owner or a paired session with the right scope.
-    if (method === "GET" && !path.startsWith("/api/") && !path.startsWith("/.well-known/") && (moveFreeze.screen(path) ? (res.writeHead(302, { location: moveFreeze.screen(path)!, "cache-control": "no-store" }).end(), true) : serveStatic(res, path, STATIC_DIR))) return;
+    if (method === "GET" && portal.pageGuard(req, res, path)) return; if (method === "GET" && !path.startsWith("/api/") && !path.startsWith("/.well-known/") && (moveFreeze.screen(path) ? (res.writeHead(302, { location: moveFreeze.screen(path)!, "cache-control": "no-store" }).end(), true) : serveStatic(res, path, STATIC_DIR))) return;
     if (method === "GET" && path === "/.well-known/openmausbot/environment") {
       return json(res, 200, environmentDescriptor({ environmentId: ENVIRONMENT_ID, ...TEAM_LABEL, desktopManaged: DESKTOP_MANAGED, emailSignIn: !HOSTED_WORKSPACE && !CLOUD_HOME && emailSignIn.enabled(), sharedComputers: lendingEnabled(), cloudHome: Boolean(CLOUD_HOME), cloudTeam: CLOUD_TEAM !== null, ownHome: ownHome.takesMove() }));
     }
@@ -12462,7 +12462,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     }
     if (await emailSignInRoute({ cloudHome: Boolean(CLOUD_HOME), emailSignIn, sessions, cookieName: SESSION_COOKIE, target: (r) => signInMailTarget(publicUrl(), requestOrigin(r)),
       environment: () => environmentDescriptor({ environmentId: ENVIRONMENT_ID, ...TEAM_LABEL, desktopManaged: DESKTOP_MANAGED, emailSignIn: true, sharedComputers: lendingEnabled() }) }, req, res, path, method)) return;
-    if ((path.startsWith("/api/portal/") || path.startsWith("/api/admin/")) && (await portal.routes({ req, res, url, path, method, auth: { kind: "loopback", scopes: [], trust: "service" }, json, readBody }), true)) return; if ((cloudSigned && await cloudSigned({ req, res, url, path, method })) || chatApps.serveFile(req, res, path, method) || await cliLogin.open(req, res, path, method)) return;
+    if (await portal.dispatch({ req, res, url, path, method, auth: { kind: "loopback", scopes: [], trust: "service" }, json, readBody })) return; if ((cloudSigned && await cloudSigned({ req, res, url, path, method })) || chatApps.serveFile(req, res, path, method) || await cliLogin.open(req, res, path, method)) return;
     if (method === "POST" && path === "/api/auth/pair") {
       // JSON only: a cross-site HTML form cannot send this content type without a preflight, so no unused code is planted as a session.
       if (!/^application\/json\b/i.test(String(req.headers["content-type"] ?? ""))) {

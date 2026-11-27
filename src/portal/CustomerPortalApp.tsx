@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from "react";
-import { QRCodeSVG } from "qrcode.react";
 import {
   Bot,
   Brain,
@@ -10,8 +9,7 @@ import {
   FileText,
   Lock,
   LogOut,
-  QrCode,
-  RefreshCw,
+  MessageSquare,
   Settings,
   ShieldAlert,
   XCircle,
@@ -25,16 +23,17 @@ import type {
   PortalBotSummary,
   PortalMemorySkillView,
   PortalSpendOverview,
-  QrLoginChallenge,
   TenantPortalSettings,
   TenantScheduleConfig,
 } from "../../shared/portal";
 import type { Ticket } from "../../shared/tickets";
+import { ChannelPlatformsTab } from "./ChannelPlatformsTab";
 
-type PortalTab = "bots" | "approvals" | "spend" | "schedule" | "memory" | "settings";
+type PortalTab = "bots" | "channels" | "approvals" | "spend" | "schedule" | "memory" | "settings";
 
 const NAV_ITEMS: Array<{ id: PortalTab; label: string; icon: typeof Bot }> = [
   { id: "bots", label: "Bot 列表", icon: Bot },
+  { id: "channels", label: "消息平台", icon: MessageSquare },
   { id: "approvals", label: "Ticket 与审批", icon: FileText },
   { id: "spend", label: "消耗", icon: Coins },
   { id: "schedule", label: "定时任务", icon: Clock },
@@ -62,10 +61,6 @@ export function CustomerPortalApp() {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [statusNote, setStatusNote] = useState<string | null>(null);
 
-  // QR Login state
-  const [challenge, setChallenge] = useState<QrLoginChallenge | null>(null);
-  const [qrLoading, setQrLoading] = useState(false);
-
   // 6 pages data
   const [bots, setBots] = useState<PortalBotSummary[]>([]);
   const [tickets, setTickets] = useState<Ticket[]>([]);
@@ -80,22 +75,6 @@ export function CustomerPortalApp() {
   const [budgetDraft, setBudgetDraft] = useState<DualBudgetPolicy | null>(null);
   const [approversText, setApproversText] = useState("");
   const [suggestionDraft, setSuggestionDraft] = useState<{ memoryId: string; suggestedContent: string; reason: string } | null>(null);
-
-  const loadQrChallenge = useCallback(async () => {
-    setQrLoading(true);
-    setErrorBanner(null);
-    try {
-      const { challenge: next } = await portalApi<{ challenge: QrLoginChallenge }>("/api/portal/auth/qr/start", {
-        method: "POST",
-        body: "{}",
-      });
-      setChallenge(next);
-    } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : "生成飞书登录二维码失败");
-    } finally {
-      setQrLoading(false);
-    }
-  }, []);
 
   const refreshAll = useCallback(async () => {
     try {
@@ -131,33 +110,10 @@ export function CustomerPortalApp() {
       })
       .catch(() => {
         setSession(null);
-        void loadQrChallenge();
+        window.location.replace("/login");
       })
       .finally(() => setCheckingAuth(false));
-  }, [loadQrChallenge]);
-
-  // Poll QR status until confirmed, then exchange for control-plane session cookie.
-  useEffect(() => {
-    if (session || !challenge || challenge.status !== "pending") return;
-    const timer = window.setInterval(async () => {
-      try {
-        const res = await portalApi<{ challenge: QrLoginChallenge }>(
-          `/api/portal/auth/qr/status?qrToken=${encodeURIComponent(challenge.qrToken)}`,
-        );
-        setChallenge(res.challenge);
-        if (res.challenge.status === "confirmed") {
-          const exchanged = await portalApi<{ session: CustomerSession }>("/api/portal/auth/qr/exchange", {
-            method: "POST",
-            body: JSON.stringify({ qrToken: challenge.qrToken, cookie: true }),
-          });
-          setSession(exchanged.session);
-        }
-      } catch {
-        // Keep polling until expiry or user refresh.
-      }
-    }, 1500);
-    return () => window.clearInterval(timer);
-  }, [session, challenge]);
+  }, []);
 
   // Load tenant data and subscribe to dual-channel SSE approval updates when signed in.
   useEffect(() => {
@@ -171,9 +127,9 @@ export function CustomerPortalApp() {
   }, [session, refreshAll]);
 
   const handleLogout = async () => {
-    await portalApi("/api/portal/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
+    await portalApi("/api/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
     setSession(null);
-    void loadQrChallenge();
+    window.location.replace("/login");
   };
 
   const handleToggleBot = async (bot: PortalBotSummary) => {
@@ -304,48 +260,7 @@ export function CustomerPortalApp() {
   if (!session) {
     return (
       <div className="min-h-screen bg-app text-ink flex items-center justify-center p-6">
-        <div className="w-full max-w-md rounded-xl border border-hairline bg-card p-6 space-y-5">
-          <div className="flex items-center gap-3">
-            <QrCode className="w-5 h-5 text-ink" aria-hidden="true" />
-            <div>
-              <h1 className="text-[20px] font-semibold tracking-[-0.01em] text-ink">客户 Web 门户</h1>
-              <p className="text-[12px] text-ink-tertiary">使用飞书扫码登录，查看本租户 Bot、审批、消耗与审计</p>
-            </div>
-          </div>
-
-          {errorBanner && (
-            <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-[13px] text-danger">
-              {errorBanner}
-            </div>
-          )}
-
-          <div className="flex flex-col items-center justify-center rounded-xl border border-hairline bg-panel p-6 space-y-3">
-            {challenge && challenge.status === "pending" ? (
-              <>
-                <div className="rounded-lg bg-card p-3 border border-hairline">
-                  <QRCodeSVG value={challenge.qrUrl} size={184} />
-                </div>
-                <p className="text-[12px] text-ink-secondary">请使用飞书扫描二维码完成身份确认（免密码登录）</p>
-              </>
-            ) : (
-              <p className="text-[13px] text-ink-secondary">
-                {qrLoading ? "正在生成二维码…" : "二维码已过期，请刷新"}
-              </p>
-            )}
-            <button
-              type="button"
-              onClick={() => void loadQrChallenge()}
-              className="inline-flex items-center gap-1.5 rounded-full border border-hairline bg-control px-3.5 py-1.5 text-[13px] font-medium text-ink hover:bg-ink/[0.06]"
-            >
-              <RefreshCw className="w-3.5 h-3.5" aria-hidden="true" />
-              刷新二维码
-            </button>
-          </div>
-
-          <p className="text-[12px] text-ink-tertiary">
-            手机、iPad 与电脑共用控制面会话。同一租户按管理员 / 普通成员划分权限。
-          </p>
-        </div>
+        <span className="text-[13px] text-ink-secondary">正在跳转到统一登录页…</span>
       </div>
     );
   }
@@ -794,6 +709,20 @@ export function CustomerPortalApp() {
               )}
             </div>
           </section>
+        )}
+
+        {activeTab === "channels" && (
+          <ChannelPlatformsTab
+            bots={bots}
+            onNotify={(msg) => {
+              setErrorBanner(null);
+              setStatusNote(msg);
+            }}
+            onError={(msg) => {
+              setStatusNote(null);
+              setErrorBanner(msg);
+            }}
+          />
         )}
       </main>
     </div>
