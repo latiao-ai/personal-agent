@@ -1,5 +1,6 @@
 import type { PortalEngine } from "../portal/engine.ts";
 import { ChannelGatewayEngine, type BotDispatcher } from "./engine.ts";
+import type { GatewayThreadSink } from "./thread-sync.ts";
 
 export interface GatewayHost {
   engine: ChannelGatewayEngine;
@@ -11,12 +12,13 @@ export interface GatewayHost {
 /** Composes the resident multi-platform messaging gateway alongside the control-plane server. */
 export function createGatewayHost(
   dataDir: string,
-  deps: { portal: PortalEngine; dispatchToBot?: BotDispatcher },
+  deps: { portal: PortalEngine; dispatchToBot?: BotDispatcher; threadSink?: GatewayThreadSink },
 ): GatewayHost {
   const engine = new ChannelGatewayEngine({
     dataDir,
     portal: deps.portal,
     dispatchToBot: deps.dispatchToBot,
+    threadSink: deps.threadSink,
   });
   return {
     engine,

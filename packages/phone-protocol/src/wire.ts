@@ -441,7 +441,7 @@ export interface WireMessage extends ServerTextLine, HelperIntroField, SetupCard
   id: string;
   role: "bot" | "user";
   kind: "text" | "options" | "activity" | "screen" | "connector" | "secret" | "signin" | "routine.run" | "goal.run" | "burst" | "digest" | "compaction" | "call" | "widget" | "app";
-  text?: string;
+  text?: string; source?: "feishu" | "weixin" | "web";
   digest?: TurnDigest;
   /** kind "compaction" with no `compaction` record: the engine condensed its own session. A marker for people, never context. */
   engineCompaction?: true;

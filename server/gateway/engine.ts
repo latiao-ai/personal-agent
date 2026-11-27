@@ -9,8 +9,10 @@ import type {
   GatewayPlatformName,
   NormalizedInboundMessage,
 } from "../../shared/gateway.ts";
+import { RelayDriver } from "../drivers/relay.ts";
 import type { PortalEngine } from "../portal/engine.ts";
 import { FeishuAdapter, WeComAdapter, WeixinAdapter } from "./adapters.ts";
+import { FeishuThreadSync, type GatewayThreadSink } from "./thread-sync.ts";
 
 export interface BotDispatchRequest {
   tenantId: string;
@@ -34,6 +36,7 @@ export interface ChannelGatewayOptions {
   dataDir: string;
   portal: PortalEngine;
   dispatchToBot?: BotDispatcher;
+  threadSink?: GatewayThreadSink;
   feishuAdapter?: FeishuAdapter;
   weixinAdapter?: WeixinAdapter;
   detectExternalConsumers?: () => ExternalConsumerConflict[];
@@ -41,14 +44,16 @@ export interface ChannelGatewayOptions {
 }
 
 export interface GatewayDispatchOutcome {
-  status: "routed" | "duplicate" | "rejected";
+  status: "routed" | "duplicate" | "rejected" | "failed";
   reason?: string;
   tenantId?: string;
   botId?: string;
+  threadId?: string;
   replyText?: string;
 }
 
 const MAX_LOG_ENTRIES = 500;
+const FEISHU_FAILURE_REPLY = "处理失败，请重试";
 
 /**
  * Control-plane resident multi-platform messaging gateway (Hermes-style layering with multi-tenant isolation).
@@ -60,6 +65,7 @@ export class ChannelGatewayEngine {
   readonly feishu: FeishuAdapter;
   readonly weixin: WeixinAdapter;
   readonly wecom: WeComAdapter;
+  readonly threadSync: FeishuThreadSync;
   private readonly lockFilePath: string;
   private readonly db: DatabaseSync;
   private readonly dispatchToBot: BotDispatcher;
@@ -83,7 +89,19 @@ export class ChannelGatewayEngine {
     this.detectExternalConsumers = options.detectExternalConsumers;
     this.dispatchToBot =
       options.dispatchToBot ??
-      (async (req) => `[${req.botId}] 已收到消息：${req.text}`);
+      (async (req) => {
+        const driver = new RelayDriver({
+          proxy: this.portal.llmProxy,
+          tenantId: req.tenantId,
+          botId: req.botId,
+        });
+        const result = await driver.runTurn({
+          text: req.text,
+          chatId: req.chatId,
+          senderId: req.senderId,
+        });
+        return result.text;
+      });
 
     this.lockFilePath = join(options.dataDir, "gateway-consumer.lock");
     const dbPath = join(options.dataDir, "gateway-deliveries.sqlite");
@@ -101,6 +119,11 @@ export class ChannelGatewayEngine {
         PRIMARY KEY (platform, event_id)
       );
     `);
+    this.threadSync = new FeishuThreadSync({
+      db: this.db,
+      sink: options.threadSink,
+      now: this.now,
+    });
 
     this.unsubscribes.push(
       this.feishu.onMessage(async (msg) => {
@@ -328,46 +351,120 @@ export class ChannelGatewayEngine {
       resolvedUserId = identity.userId;
     }
 
-    // 8. Record event as accepted & dispatch to the target Bot in this tenant.
-    this.recordEvent(message.platform, message.eventId, binding.tenantId, binding.botId, "routed");
-    const replyText = await this.dispatchToBot({
-      tenantId: binding.tenantId,
-      botId: binding.botId,
-      platform: message.platform,
-      chatId: message.chatId,
-      chatType: message.chatType,
-      senderId: message.senderId,
-      userId: resolvedUserId,
-      text: message.text,
-    });
-
-    if (replyText) {
-      const adapter = message.platform === "feishu" ? this.feishu : this.weixin;
-      await adapter.sendReply({
-        appId: binding.platformAppId,
-        chatId: message.chatId,
-        replyToMessageId: message.messageId,
-        text: replyText,
-      });
+    // 8. Atomically claim event_id to prevent concurrent duplicate processing.
+    const claimed = this.claimEvent(message.platform, message.eventId, binding.tenantId, binding.botId, "routed");
+    if (!claimed) {
+      this.duplicateCount += 1;
+      return { status: "duplicate", reason: "duplicate_event_id" };
     }
 
-    this.routedCount += 1;
-    this.pushLog({
-      level: "info",
-      platform: message.platform,
-      eventType: "message_routed",
-      tenantId: binding.tenantId,
-      botId: binding.botId,
-      chatId: message.chatId,
-      message: `消息 ${message.messageId} 已路由至 Bot ${binding.botId}（租户 ${binding.tenantId}）`,
-    });
+    const adapter = message.platform === "feishu" ? this.feishu : this.weixin;
+    const isFeishuDm = message.platform === "feishu" && message.chatType === "p2p";
+    const threadId = isFeishuDm
+      ? this.threadSync.resolveOrCreateThread(binding.botId, message.senderId, message.chatId)
+      : null;
 
-    return {
-      status: "routed",
-      tenantId: binding.tenantId,
-      botId: binding.botId,
-      replyText: replyText ?? undefined,
+    const executeTurn = async (): Promise<GatewayDispatchOutcome> => {
+      const eventTime = message.rawTimestampMs ?? this.now();
+      if (threadId) {
+        this.threadSync.appendUserMessage(threadId, {
+          text: message.text,
+          source: "feishu",
+          senderId: message.senderId,
+          at: eventTime,
+        });
+        this.threadSync.setThinking(binding.botId, threadId, true);
+      }
+
+      try {
+        const replyText = await this.dispatchToBot({
+          tenantId: binding.tenantId,
+          botId: binding.botId,
+          platform: message.platform,
+          chatId: message.chatId,
+          chatType: message.chatType,
+          senderId: message.senderId,
+          userId: resolvedUserId,
+          text: message.text,
+        });
+
+        if (replyText && threadId) {
+          this.threadSync.appendAssistantMessage(threadId, {
+            text: replyText,
+            at: this.now(),
+          });
+        }
+
+        if (replyText) {
+          await adapter.sendReply({
+            appId: binding.platformAppId,
+            chatId: message.chatId,
+            replyToMessageId: message.messageId,
+            text: replyText,
+          });
+        }
+
+        if (threadId) {
+          this.threadSync.setThinking(binding.botId, threadId, false);
+        }
+
+        this.routedCount += 1;
+        this.pushLog({
+          level: "info",
+          platform: message.platform,
+          eventType: "message_routed",
+          tenantId: binding.tenantId,
+          botId: binding.botId,
+          chatId: message.chatId,
+          message: `消息 ${message.messageId} 已路由至 Bot ${binding.botId}（租户 ${binding.tenantId}）`,
+        });
+
+        return {
+          status: "routed",
+          tenantId: binding.tenantId,
+          botId: binding.botId,
+          ...(threadId ? { threadId } : {}),
+          replyText: replyText ?? undefined,
+        };
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        if (threadId) {
+          this.threadSync.appendFailureMessage(threadId, { error: detail, at: this.now() });
+          this.threadSync.setThinking(binding.botId, threadId, false);
+        }
+        try {
+          await adapter.sendReply({
+            appId: binding.platformAppId,
+            chatId: message.chatId,
+            replyToMessageId: message.messageId,
+            text: FEISHU_FAILURE_REPLY,
+          });
+        } catch {
+          // Best-effort failure notice to Feishu when the outbound send itself failed.
+        }
+        this.pushLog({
+          level: "error",
+          platform: message.platform,
+          eventType: "message_failed",
+          tenantId: binding.tenantId,
+          botId: binding.botId,
+          chatId: message.chatId,
+          message: `消息 ${message.messageId} 处理失败：${detail}`,
+        });
+        return {
+          status: "failed",
+          reason: detail,
+          tenantId: binding.tenantId,
+          botId: binding.botId,
+          ...(threadId ? { threadId } : {}),
+        };
+      }
     };
+
+    if (threadId) {
+      return this.threadSync.enqueueSerial(threadId, message.rawTimestampMs ?? this.now(), executeTurn);
+    }
+    return executeTurn();
   }
 
   private rejectEvent(
@@ -391,6 +488,22 @@ export class ChannelGatewayEngine {
     return { status: "rejected", reason, tenantId, botId };
   }
 
+  private claimEvent(
+    platform: GatewayPlatformName,
+    eventId: string,
+    tenantId: string | null,
+    botId: string | null,
+    status: string,
+  ): boolean {
+    const result = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO gateway_events (platform, event_id, tenant_id, bot_id, status, received_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(platform, eventId, tenantId, botId, status, this.now());
+    return Number(result.changes) > 0;
+  }
+
   private recordEvent(
     platform: GatewayPlatformName,
     eventId: string,
@@ -398,12 +511,7 @@ export class ChannelGatewayEngine {
     botId: string | null,
     status: string,
   ): void {
-    this.db
-      .prepare(
-        `INSERT OR IGNORE INTO gateway_events (platform, event_id, tenant_id, bot_id, status, received_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(platform, eventId, tenantId, botId, status, this.now());
+    this.claimEvent(platform, eventId, tenantId, botId, status);
   }
 
   getHealthSnapshot(): GatewayHealthSnapshot {

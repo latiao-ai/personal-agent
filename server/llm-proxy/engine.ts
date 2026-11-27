@@ -35,9 +35,37 @@ export interface RelayProviderRegistration extends LlmRelayProviderConfig {
   vaultSecretName: string;
 }
 
+export interface ChatCompletionToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export interface ChatCompletionMessage {
+  role: string;
+  content: string | null;
+  tool_calls?: ChatCompletionToolCall[];
+  tool_call_id?: string;
+  name?: string;
+}
+
+export interface ChatCompletionToolDefinition {
+  type: "function";
+  function: {
+    name: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+  };
+}
+
 export interface ChatCompletionRequest {
   model?: string;
-  messages: Array<{ role: string; content: string }>;
+  messages: ChatCompletionMessage[];
+  tools?: ChatCompletionToolDefinition[];
+  tool_choice?: unknown;
   temperature?: number;
   max_tokens?: number;
 }
@@ -48,7 +76,11 @@ export interface ChatCompletionResponse {
   model: string;
   choices: Array<{
     index: number;
-    message: { role: "assistant"; content: string };
+    message: {
+      role: "assistant";
+      content: string | null;
+      tool_calls?: ChatCompletionToolCall[];
+    };
     finish_reason: string;
   }>;
   usage?: {
@@ -61,11 +93,13 @@ export interface ChatCompletionResponse {
 export class LlmProxyError extends Error {
   readonly status: number;
   readonly code: string;
+  readonly upstreamStatus?: number;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, upstreamStatus?: number) {
     super(message);
     this.status = status;
     this.code = code;
+    this.upstreamStatus = upstreamStatus;
   }
 }
 
@@ -461,7 +495,10 @@ export class ControlPlaneLlmProxy {
     return env;
   }
 
-  private validateVirtualToken(rawToken: string | null | undefined): LlmVirtualTokenRecord {
+  private validateVirtualToken(
+    rawToken: string | null | undefined,
+    expectedTenantId?: string,
+  ): LlmVirtualTokenRecord {
     if (!rawToken) {
       throw new LlmProxyError(401, "missing_virtual_token", "缺少租户临时模型令牌");
     }
@@ -474,6 +511,9 @@ export class ControlPlaneLlmProxy {
     }
     if (this.now() > record.expiresAt) {
       throw new LlmProxyError(401, "virtual_token_expired", "模型令牌已过期");
+    }
+    if (expectedTenantId && record.tenantId !== expectedTenantId) {
+      throw new LlmProxyError(403, "tenant_mismatch", "跨租户模型令牌拒绝调用");
     }
     if (record.usedTokensToday >= record.maxTokensPerDay || record.usedCostUsdToday >= record.maxCostUsdPerDay) {
       throw new LlmProxyError(402, "budget_exceeded", "已超出租户/Bot 每日模型预算上限，已熔断");
@@ -508,8 +548,9 @@ export class ControlPlaneLlmProxy {
     rawVirtualToken: string | null | undefined,
     body: ChatCompletionRequest,
     signal?: AbortSignal,
+    options?: { expectedTenantId?: string },
   ): Promise<ChatCompletionResponse> {
-    const tokenRecord = this.validateVirtualToken(rawVirtualToken);
+    const tokenRecord = this.validateVirtualToken(rawVirtualToken, options?.expectedTenantId);
     const today = formatUtcDate(this.now());
     if (this.store) {
       const daily = this.store.getUsage(tokenRecord.tenantId, today);
@@ -554,6 +595,7 @@ export class ControlPlaneLlmProxy {
             502,
             "relay_upstream_error",
             `中转站 ${provider.id} 返回状态 ${res.status}`,
+            res.status,
           );
           continue;
         }
@@ -583,6 +625,10 @@ export class ControlPlaneLlmProxy {
         tokenRecord.usedCostUsdToday += Number(cost.toFixed(8));
         return data;
       } catch (err) {
+        if (signal?.aborted || (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError"))) {
+          lastError = new LlmProxyError(504, "relay_timeout", `中转站 ${provider.id} 请求超时`);
+          break;
+        }
         this.recordProviderFailure(provider.id);
         const safeMsg = err instanceof Error ? err.message.replaceAll(masterKey, "[REDACTED]") : "relay_network_error";
         lastError = new LlmProxyError(503, "relay_unreachable", `中转站 ${provider.id} 不可达: ${safeMsg}`);

@@ -233,7 +233,7 @@ import { createGoalTurns } from "./host/goal-turns.ts";
 import { createGoalCards, type LiveGoalRun } from "./host/goal-cards.ts";
 import { createOneOnOneGoals } from "./host/one-on-one-goals.ts";
 
-import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
+import { createRelayWiring } from "./host/relay-wiring.ts"; import { createStoreThreadSink } from "./gateway/thread-sync.ts";
 import { openCodeProviderKeysAllowed, setOpenCodeProviderKeyPolicy } from "./drivers/acp/opencode-go.ts";
 import { forgetNotificationReader, liveAppRows, openCardRows, readMessageText, recallMessages, recentMessages, closeMessageSearch, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups, threadsReferencing, logNotification, lastRowAt, threadsWithCardsSince } from "./message-db.ts";
 import { briefCrossingLabel, claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
@@ -770,7 +770,7 @@ let companionMutationToken: string | undefined = DESKTOP_MANAGED ? "" : undefine
 const FALLBACK_PUBLIC_URL = process.env.OMB_PUBLIC_URL?.trim().replace(/\/+$/, "") || null; const tailnetShare = createTailnetShare({ port: PORT, handle: (req, res) => handleRequest(req, res), attach: (listener, handle) => upgrades.attach(listener, handle), log: (line) => console.log(line) });
 const cfg = loadConfig();
 const hostedModels = hostedModelPolicy(DATA_DIR);
-const providerConfigs = () => hostedModels ? hostedModels.configs() : instanceConfigs(cfg);
+const relayWiring = createRelayWiring(); const providerConfigs = () => relayWiring.providerConfigs();
 const decorateHostedProvider = hostedModels ? (instance: ProviderInstance) => hostedModels.decorate(instance) : undefined;
 if (hostedModels) {
   const selection = hostedModels.select(cfg.defaultModelSelection);
@@ -798,9 +798,9 @@ function customDomainStatus() {
     serverIpv4: DESKTOP_MANAGED ? null : customDomainIpv4(),
   };
 }
-const registry = new ProviderRegistry(BUILT_IN_DRIVERS, { statusFile: join(DATA_DIR, "providers", "engine-status.json") });
+const registry = new ProviderRegistry(relayWiring.drivers, { statusFile: join(DATA_DIR, "providers", "engine-status.json") });
 const supportsApprovalMode = createApprovalModeSupport(registry);
-registerEnginesBinDir(); const engineUpdates = engineUpdatesFor({ drivers: BUILT_IN_DRIVERS, turnRunning: () => store.bots.some((bot) => botHasActiveTurn(bot.id)) || store.groups.some(groupIsWorking) || Boolean(routines?.hasActiveRuns()), configuredClis: () => Object.values(providerConfigs()).flatMap((entry) => { const cli = (entry.config as { cli?: unknown } | undefined)?.cli; return typeof cli === "string" && cli ? [cli] : []; }), updated: () => { registry.forgetSnapshots(); broadcast({ kind: "config", ...configStatus() }); } });
+registerEnginesBinDir(); const engineUpdates = engineUpdatesFor({ drivers: relayWiring.drivers, turnRunning: () => store.bots.some((bot) => botHasActiveTurn(bot.id)) || store.groups.some(groupIsWorking) || Boolean(routines?.hasActiveRuns()), configuredClis: () => Object.values(providerConfigs()).flatMap((entry) => { const cli = (entry.config as { cli?: unknown } | undefined)?.cli; return typeof cli === "string" && cli ? [cli] : []; }), updated: () => { registry.forgetSnapshots(); broadcast({ kind: "config", ...configStatus() }); } });
 
 // Set only when a turn is admitted, never on queue or steer, so a second person's words cannot re-book the first person's turn.
 const threadMaps = createThreadMaps(); const turnTriggers = threadMaps.track(new Map<string, UsageTrigger>());
@@ -1498,7 +1498,7 @@ function computerPlaceRefusal(kind: ComputerKind): { message: string; code: "clo
   return managed ? { message: managed, code: "managed_policy" } : undefined;
 }
 function policyModelRefusal(instance: { instanceId: string; driverKind: string }): string | undefined {
-  const engine = BUILT_IN_DRIVERS.find(driver => driver.driverKind === instance.driverKind)?.metadata.displayName;
+  const engine = relayWiring.drivers.find(driver => driver.driverKind === instance.driverKind)?.metadata.displayName;
   return managedPolicy.modelRefusal({ driverKind: instance.driverKind, displayName: engine }, managedDesktop.owns(instance.instanceId));
 }
 const managedDesktop = new ManagedDesktopProviders({
@@ -2673,7 +2673,7 @@ function modelName(selection: ModelSelection): string {
   return instance ? `${instance.displayName || instance.driverKind} · ${label}` : label;
 }
 
-function healThreadModel(botId: string, threadId: string): void {
+function healThreadModel(botId: string, threadId: string): void { if (relayWiring.migrateLegacyCliSelection(store, botId, threadId, threadBusy(botId, threadId))) return;
   const bot = store.bot(botId);
   const own = threadModelGivingWay(botId, threadId);
   if (!bot || !own || bot.approvalGrant || threadBusy(botId, threadId)) return;
@@ -9350,7 +9350,7 @@ async function undoAppliedChange(res: ServerResponse, threadId: string, requestI
   json(res, 200, { ok: true, undone: true, ...(result.state === "already_undone" ? { alreadyUndone: true } : {}) });
 }
 
-const tickets = createTicketHost(DATA_DIR); const approvals = createApprovalHost(DATA_DIR); const routing = createRoutingHost(tickets.engine); const patrol = createPatrolHost(DATA_DIR, { tickets: tickets.engine, approvals: approvals.engine }); const memorySkill = createMemorySkillHost(DATA_DIR); const isolation = createIsolationHost(DATA_DIR, { memorySkill: memorySkill.engine, vault: approvals.engine.vault }); const portal = createPortalHost(DATA_DIR, { tickets: tickets.engine, approvals: approvals.engine, patrol: patrol.engine, memorySkill: memorySkill.engine, isolation: isolation.engine }); const webhooks = new WebhookManager({
+const tickets = createTicketHost(DATA_DIR); const approvals = createApprovalHost(DATA_DIR); const patrol = createPatrolHost(DATA_DIR, { tickets: tickets.engine, approvals: approvals.engine }); const memorySkill = createMemorySkillHost(DATA_DIR); const isolation = createIsolationHost(DATA_DIR, { memorySkill: memorySkill.engine, vault: approvals.engine.vault }); const portal = createPortalHost(DATA_DIR, { tickets: tickets.engine, approvals: approvals.engine, patrol: patrol.engine, memorySkill: memorySkill.engine, isolation: isolation.engine, threadSink: createStoreThreadSink(store) }); relayWiring.attachProxy(portal.llmProxy.engine); registry.forgetSnapshots(); const routing = createRoutingHost(tickets.engine, { smallModel: portal.llmProxy.engine.createJevSmallModel("tenant_default") }); const webhooks = new WebhookManager({
   emit: (event) => { broadcast(event); starterRoutineWake?.emitted(event); },
   botState: unattendedDispatchState,
   enqueue: (input) => { tickets.observeWebhook(input); const capped = usageCapGate.refusal(input.botId, input.byPerson === true, threadLanguage(store.bot(input.botId)?.threadId ?? "")); if (capped) throw Object.assign(new Error(capped), { status: 429, code: USAGE_CAP_CODE }); return routines!.enqueueWebhook(input); },

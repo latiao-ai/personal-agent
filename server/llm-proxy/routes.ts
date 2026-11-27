@@ -9,10 +9,34 @@ const chatSchema = z.object({
     .array(
       z.object({
         role: z.string().min(1),
-        content: z.string(),
+        content: z.string().nullable(),
+        tool_calls: z
+          .array(
+            z.object({
+              id: z.string(),
+              type: z.literal("function"),
+              function: z.object({ name: z.string(), arguments: z.string() }),
+            }),
+          )
+          .optional(),
+        tool_call_id: z.string().optional(),
+        name: z.string().optional(),
       }),
     )
     .min(1),
+  tools: z
+    .array(
+      z.object({
+        type: z.literal("function"),
+        function: z.object({
+          name: z.string(),
+          description: z.string().optional(),
+          parameters: z.record(z.string(), z.unknown()).optional(),
+        }),
+      }),
+    )
+    .optional(),
+  tool_choice: z.unknown().optional(),
   temperature: z.number().optional(),
   max_tokens: z.number().int().positive().optional(),
 });

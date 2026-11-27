@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import type { ApprovalEngine } from "../approvals/engine.ts";
 import { createGatewayHost, type GatewayHost } from "../gateway/host.ts";
+import type { GatewayThreadSink } from "../gateway/thread-sync.ts";
 import type { IsolationEngine } from "../isolation/engine.ts";
 import { createLlmProxyHost, type LlmProxyHost } from "../llm-proxy/host.ts";
 import type { MemorySkillEngine } from "../memory-skill/engine.ts";
@@ -30,6 +31,7 @@ export interface PortalHostDeps {
   patrol: PatrolEngine;
   memorySkill: MemorySkillEngine;
   isolation: IsolationEngine;
+  threadSink?: GatewayThreadSink;
   autoStartGateway?: boolean;
 }
 
@@ -43,7 +45,7 @@ export function createPortalHost(dataDir: string, deps: PortalHostDeps): PortalH
     memorySkill: deps.memorySkill,
     isolation: deps.isolation,
   });
-  const gateway = createGatewayHost(dataDir, { portal: engine });
+  const gateway = createGatewayHost(dataDir, { portal: engine, threadSink: deps.threadSink });
   const llmProxy = createLlmProxyHost({ vault: deps.approvals.vault, engine: engine.llmProxy });
   const portalRoutes = createPortalRoutes({ portal: engine, gateway: gateway.engine });
 
