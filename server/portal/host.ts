@@ -44,7 +44,7 @@ export function createPortalHost(dataDir: string, deps: PortalHostDeps): PortalH
     isolation: deps.isolation,
   });
   const gateway = createGatewayHost(dataDir, { portal: engine });
-  const llmProxy = createLlmProxyHost({ vault: deps.approvals.vault });
+  const llmProxy = createLlmProxyHost({ vault: deps.approvals.vault, engine: engine.llmProxy });
   const portalRoutes = createPortalRoutes({ portal: engine, gateway: gateway.engine });
 
   if (deps.autoStartGateway !== false) {

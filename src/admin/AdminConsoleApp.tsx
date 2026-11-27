@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { KeyRound, LogOut, Plus, Server, Trash2, Users } from "lucide-react";
 
+import type { AdminLlmProviderView } from "../../shared/llm-proxy";
 import type {
   AdminAccount,
   AdminOffboardResult,
@@ -10,6 +11,7 @@ import type {
   PortalAuditEntry,
   PortalUserAccount,
 } from "../../shared/portal";
+import { AdminLlmSection } from "./AdminLlmSection";
 import { AdminUsersSection } from "./AdminUsersSection";
 
 async function adminApi<T>(path: string, init?: RequestInit): Promise<T> {
@@ -36,6 +38,7 @@ export function AdminConsoleApp() {
   const [audit, setAudit] = useState<PortalAuditEntry[]>([]);
   const [accounts, setAccounts] = useState<AdminAccount[]>([]);
   const [portalUsers, setPortalUsers] = useState<PortalUserAccount[]>([]);
+  const [llmProviders, setLlmProviders] = useState<AdminLlmProviderView[]>([]);
 
   // Provision form
   const [newTenantId, setNewTenantId] = useState("");
@@ -47,18 +50,20 @@ export function AdminConsoleApp() {
 
   const refreshAll = useCallback(async () => {
     try {
-      const [tRes, reqRes, audRes, accRes, usrRes] = await Promise.all([
+      const [tRes, reqRes, audRes, accRes, usrRes, llmRes] = await Promise.all([
         adminApi<{ tenants: AdminTenantOverview[] }>("/api/admin/tenants"),
         adminApi<{ requests: CoreSkillHashChangeRequest[] }>("/api/admin/core-skills/requests"),
         adminApi<{ audit: PortalAuditEntry[] }>("/api/admin/audit?limit=100"),
         adminApi<{ accounts: AdminAccount[] }>("/api/admin/accounts"),
         adminApi<{ users: PortalUserAccount[] }>("/api/admin/users"),
+        adminApi<{ providers: AdminLlmProviderView[] }>("/api/admin/llm/providers"),
       ]);
       setTenants(tRes.tenants);
       setCoreRequests(reqRes.requests);
       setAudit(audRes.audit);
       setAccounts(accRes.accounts);
       setPortalUsers(usrRes.users);
+      setLlmProviders(llmRes.providers);
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : "加载管理后台数据失败");
     }
@@ -294,6 +299,20 @@ export function AdminConsoleApp() {
           </div>
         )}
       </section>
+
+      {/* LLM Provider & Pricing Config */}
+      <AdminLlmSection
+        providers={llmProviders}
+        onRefresh={refreshAll}
+        onNotify={(msg) => {
+          setErrorBanner(null);
+          setStatusNote(msg);
+        }}
+        onError={(msg) => {
+          setStatusNote(null);
+          setErrorBanner(msg);
+        }}
+      />
 
       {/* Core Skill Hash Approval Queue */}
       <section className="space-y-3">

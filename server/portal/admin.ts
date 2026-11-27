@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 
 import type { VmQuota } from "../../shared/isolation.ts";
+import type { AdminLlmProviderView, LlmPricing, TenantLlmUsage } from "../../shared/llm-proxy.ts";
 import type {
   AdminAccount,
   AdminOffboardResult,
@@ -13,6 +14,8 @@ import type {
 } from "../../shared/portal.ts";
 import { formatApprovalStatusBanner, type ApprovalEngine } from "../approvals/engine.ts";
 import type { IsolationEngine } from "../isolation/engine.ts";
+import type { ControlPlaneLlmProxy } from "../llm-proxy/engine.ts";
+import type { LlmProxyStore } from "../llm-proxy/store.ts";
 import type { MemorySkillEngine } from "../memory-skill/engine.ts";
 import type { PortalStore } from "./store.ts";
 
@@ -37,6 +40,8 @@ export interface AdminOpsDeps {
   approvals: ApprovalEngine;
   isolation: IsolationEngine;
   memorySkill: MemorySkillEngine;
+  llmProxy: ControlPlaneLlmProxy;
+  llmStore: LlmProxyStore;
   now: () => number;
   registerTenantMember: (input: { tenantId: string; openId: string; displayName?: string; role: PortalRole }) => unknown;
   recordAudit: (entry: Omit<PortalAuditEntry, "id" | "at">) => PortalAuditEntry;
@@ -385,5 +390,295 @@ export class PortalAdminOps {
       statusBanner: formatApprovalStatusBanner(c),
       canAct: false,
     }));
+  }
+
+  // --- LLM Provider, Pricing & Tenant Quota Management ---
+
+  private toAdminLlmProviderView(row: {
+    id: string;
+    name: string;
+    baseUrl: string;
+    defaultModel: string;
+    fastModel: string;
+    enabled: boolean;
+    priority: number;
+    updatedBy: string;
+    updatedAt: number;
+  }): AdminLlmProviderView {
+    const mask = this.deps.llmProxy.getApiKeyMask(row.id);
+    return {
+      id: row.id,
+      name: row.name,
+      baseUrl: row.baseUrl,
+      defaultModel: row.defaultModel,
+      fastModel: row.fastModel,
+      enabled: row.enabled,
+      priority: row.priority,
+      apiKeyConfigured: mask.apiKeyConfigured,
+      apiKeyLast4: mask.apiKeyLast4,
+      updatedAt: row.updatedAt,
+      updatedBy: row.updatedBy,
+    };
+  }
+
+  listLlmProviders(_actor: AdminSession): AdminLlmProviderView[] {
+    return this.deps.llmStore.listProviders().map((row) => this.toAdminLlmProviderView(row));
+  }
+
+  saveLlmProvider(
+    actor: AdminSession,
+    input: {
+      id?: string;
+      name: string;
+      baseUrl: string;
+      apiKey?: string;
+      defaultModel: string;
+      fastModel?: string;
+      enabled?: boolean;
+      priority?: number;
+    },
+  ): AdminLlmProviderView {
+    const name = input.name.trim();
+    const baseUrl = input.baseUrl.trim().replace(/\/+$/, "");
+    const defaultModel = input.defaultModel.trim();
+    if (!name) {
+      this.deps.throwError(400, "missing_provider_name", "供应商名称必填");
+    }
+    if (!baseUrl.startsWith("https://")) {
+      this.deps.throwError(400, "invalid_base_url", "中转站地址必须以 https:// 开头");
+    }
+    if (!defaultModel) {
+      this.deps.throwError(400, "missing_default_model", "默认模型必填");
+    }
+
+    const id = input.id?.trim() || `prov_${randomUUID()}`;
+    const existing = this.deps.llmStore.getProvider(id);
+    const fastModel = input.fastModel?.trim() || defaultModel;
+    const enabled = input.enabled ?? existing?.enabled ?? true;
+    const priority = input.priority ?? existing?.priority ?? 1;
+    const apiKey = input.apiKey?.trim() || undefined;
+    const updatedAt = this.deps.now();
+
+    const saved = this.deps.llmStore.upsertProvider({
+      id,
+      name,
+      baseUrl,
+      defaultModel,
+      fastModel,
+      enabled,
+      priority,
+      updatedBy: actor.username,
+      updatedAt,
+    });
+    this.deps.llmProxy.updateProvider({
+      id: saved.id,
+      name: saved.name,
+      baseUrl: saved.baseUrl,
+      apiKey,
+      defaultModel: saved.defaultModel,
+      fastModel: saved.fastModel,
+      enabled: saved.enabled,
+      priority: saved.priority,
+    });
+
+    this.deps.recordAudit({
+      tenantId: "_control_plane",
+      actorId: actor.username,
+      actorRole: "ops_admin",
+      channel: "admin",
+      action: "llm_provider_saved",
+      targetType: "llm_provider",
+      targetId: saved.id,
+      before: existing
+        ? {
+            name: existing.name,
+            baseUrl: existing.baseUrl,
+            defaultModel: existing.defaultModel,
+            fastModel: existing.fastModel,
+            enabled: existing.enabled,
+            priority: existing.priority,
+          }
+        : null,
+      after: {
+        name: saved.name,
+        baseUrl: saved.baseUrl,
+        defaultModel: saved.defaultModel,
+        fastModel: saved.fastModel,
+        enabled: saved.enabled,
+        priority: saved.priority,
+        apiKeyUpdated: Boolean(apiKey),
+      },
+      reason: existing ? "管理员更新模型供应商配置" : "管理员新建模型供应商配置",
+    });
+
+    return this.toAdminLlmProviderView(saved);
+  }
+
+  rotateLlmApiKey(
+    actor: AdminSession,
+    providerId: string,
+    newApiKey: string,
+    confirm: boolean,
+  ): AdminLlmProviderView {
+    if (!confirm) {
+      this.deps.throwError(400, "confirmation_required", "轮换 API Key 必须二次确认 (confirm: true)");
+    }
+    const trimmedKey = newApiKey.trim();
+    if (!trimmedKey) {
+      this.deps.throwError(400, "missing_api_key", "新 API Key 不能为空");
+    }
+    const existing = this.deps.llmStore.getProvider(providerId);
+    if (!existing) {
+      this.deps.throwError(404, "provider_not_found", "未找到目标模型供应商");
+    }
+
+    const mask = this.deps.llmProxy.rotateProviderApiKey(providerId, trimmedKey);
+    const updated = this.deps.llmStore.upsertProvider({
+      ...existing,
+      updatedBy: actor.username,
+      updatedAt: this.deps.now(),
+    });
+
+    this.deps.recordAudit({
+      tenantId: "_control_plane",
+      actorId: actor.username,
+      actorRole: "ops_admin",
+      channel: "admin",
+      action: "llm_api_key_rotated",
+      targetType: "llm_provider",
+      targetId: providerId,
+      before: null,
+      after: { apiKeyLast4: mask.apiKeyLast4 },
+      reason: "管理员轮换模型供应商 API Key，旧 Key 已立即失效",
+    });
+
+    return this.toAdminLlmProviderView(updated);
+  }
+
+  async testLlmProvider(
+    actor: AdminSession,
+    providerId: string,
+  ): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
+    const result = await this.deps.llmProxy.testProvider(providerId);
+    this.deps.recordAudit({
+      tenantId: "_control_plane",
+      actorId: actor.username,
+      actorRole: "ops_admin",
+      channel: "admin",
+      action: "llm_provider_tested",
+      targetType: "llm_provider",
+      targetId: providerId,
+      before: null,
+      after: { ok: result.ok, latencyMs: result.latencyMs },
+      reason: result.ok ? "模型供应商连通性测试通过" : "模型供应商连通性测试失败",
+    });
+    return result;
+  }
+
+  getLlmPricing(providerId: string): LlmPricing {
+    return (
+      this.deps.llmStore.getPricing(providerId) ?? {
+        providerId,
+        costPer1MInputTokens: 0,
+        costPer1MOutputTokens: 0,
+        pricePer1MInputTokens: 0,
+        pricePer1MOutputTokens: 0,
+        currency: "CNY",
+      }
+    );
+  }
+
+  setLlmPricing(
+    actor: AdminSession,
+    providerId: string,
+    input: {
+      costPer1MInputTokens: number;
+      costPer1MOutputTokens: number;
+      pricePer1MInputTokens: number;
+      pricePer1MOutputTokens: number;
+    },
+  ): LlmPricing {
+    if (
+      input.costPer1MInputTokens < 0 ||
+      input.costPer1MOutputTokens < 0 ||
+      input.pricePer1MInputTokens < 0 ||
+      input.pricePer1MOutputTokens < 0
+    ) {
+      this.deps.throwError(400, "invalid_pricing", "成本价与售价不能为负数");
+    }
+    if (
+      input.pricePer1MInputTokens < input.costPer1MInputTokens ||
+      input.pricePer1MOutputTokens < input.costPer1MOutputTokens
+    ) {
+      this.deps.throwError(400, "price_below_cost", "售价必须大于或等于成本价");
+    }
+
+    const before = this.deps.llmStore.getPricing(providerId);
+    const saved = this.deps.llmStore.upsertPricing({
+      providerId,
+      costPer1MInputTokens: input.costPer1MInputTokens,
+      costPer1MOutputTokens: input.costPer1MOutputTokens,
+      pricePer1MInputTokens: input.pricePer1MInputTokens,
+      pricePer1MOutputTokens: input.pricePer1MOutputTokens,
+      currency: "CNY",
+    });
+
+    this.deps.recordAudit({
+      tenantId: "_control_plane",
+      actorId: actor.username,
+      actorRole: "ops_admin",
+      channel: "admin",
+      action: "llm_pricing_set",
+      targetType: "llm_pricing",
+      targetId: providerId,
+      before: before ? { ...before } : null,
+      after: { ...saved },
+      reason: "管理员更新模型定价表",
+    });
+    return saved;
+  }
+
+  setTenantLlmBudget(
+    actor: AdminSession,
+    tenantId: string,
+    input: { maxTokensPerDay?: number; maxCostPerDay?: number },
+  ): { tenantId: string; maxTokensPerDay: number; maxCostPerDay: number } {
+    if (
+      (input.maxTokensPerDay !== undefined && input.maxTokensPerDay < 0) ||
+      (input.maxCostPerDay !== undefined && input.maxCostPerDay < 0)
+    ) {
+      this.deps.throwError(400, "invalid_budget", "租户额度上限不能为负数");
+    }
+    const before = this.deps.llmProxy.getTenantBudget(tenantId);
+    const updated = this.deps.llmProxy.setTenantBudget(tenantId, input);
+    this.deps.recordAudit({
+      tenantId: "_control_plane",
+      actorId: actor.username,
+      actorRole: "ops_admin",
+      channel: "admin",
+      action: "llm_budget_set",
+      targetType: "tenant_llm_budget",
+      targetId: tenantId,
+      before: { ...before },
+      after: { ...updated },
+      reason: "管理员更新租户每日模型额度上限",
+    });
+    return { tenantId, ...updated };
+  }
+
+  getTenantLlmUsage(_actor: AdminSession, tenantId: string, date?: string): TenantLlmUsage {
+    const targetDate = date?.trim() || new Date(this.deps.now()).toISOString().slice(0, 10);
+    const usage = this.deps.llmStore.getUsage(tenantId, targetDate);
+    const budget = this.deps.llmProxy.getTenantBudget(tenantId);
+    return {
+      tenantId,
+      date: targetDate,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cost: usage.cost,
+      revenue: usage.revenue,
+      maxTokensPerDay: budget.maxTokensPerDay,
+      maxCostPerDay: budget.maxCostPerDay,
+    };
   }
 }

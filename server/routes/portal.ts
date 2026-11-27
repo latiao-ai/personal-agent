@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { ChannelGatewayEngine } from "../gateway/engine.ts";
 import { WeixinAdapter } from "../gateway/adapters.ts";
 import { PortalError, type PortalEngine } from "../portal/engine.ts";
+import { handleAdminLlmRoute, handlePortalLlmRoute } from "./portal-llm.ts";
 import { PASS, type RouteContext, type RouteHandler } from "./table.ts";
 
 export const PORTAL_SESSION_COOKIE = "omb_portal_session";
@@ -621,6 +622,14 @@ export function createPortalRoutes({ portal, gateway }: PortalRouteDeps): RouteH
           });
         }
 
+        const portalLlmRes = await handlePortalLlmRoute(
+          { req, res, path, method, url, json, readBody },
+          portal,
+          session,
+          requestedTenantId,
+        );
+        if (portalLlmRes !== PASS) return;
+
         return json(res, 404, { error: "portal_route_not_found" });
       }
 
@@ -808,6 +817,13 @@ export function createPortalRoutes({ portal, gateway }: PortalRouteDeps): RouteH
           logs: gateway?.listLogs({ limit: 100 }) ?? [],
         });
       }
+
+      const adminLlmRes = await handleAdminLlmRoute(
+        { req, res, path, method, url, json, readBody },
+        portal,
+        adminSession,
+      );
+      if (adminLlmRes !== PASS) return;
 
       return json(res, 404, { error: "admin_route_not_found" });
     } catch (error) {

@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 
 import type { ApprovalButtonAction, DualBudgetPolicy } from "../../shared/approvals";
+import type { PortalTenantLlmUsageView } from "../../shared/llm-proxy";
 import type {
   CustomerSession,
   PortalApprovalView,
@@ -66,6 +67,7 @@ export function CustomerPortalApp() {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [approvals, setApprovals] = useState<PortalApprovalView[]>([]);
   const [spend, setSpend] = useState<PortalSpendOverview | null>(null);
+  const [llmUsage, setLlmUsage] = useState<PortalTenantLlmUsageView | null>(null);
   const [schedule, setSchedule] = useState<TenantScheduleConfig | null>(null);
   const [memorySkill, setMemorySkill] = useState<PortalMemorySkillView | null>(null);
   const [settings, setSettings] = useState<TenantPortalSettings | null>(null);
@@ -78,11 +80,12 @@ export function CustomerPortalApp() {
 
   const refreshAll = useCallback(async () => {
     try {
-      const [botsRes, ticketsRes, approvalsRes, spendRes, schedRes, memRes, setRes, audRes] = await Promise.all([
+      const [botsRes, ticketsRes, approvalsRes, spendRes, llmUsageRes, schedRes, memRes, setRes, audRes] = await Promise.all([
         portalApi<{ bots: PortalBotSummary[] }>("/api/portal/bots"),
         portalApi<{ tickets: Ticket[] }>("/api/portal/tickets"),
         portalApi<{ approvals: PortalApprovalView[] }>("/api/portal/approvals"),
         portalApi<{ spend: PortalSpendOverview }>("/api/portal/spend"),
+        portalApi<{ usage: PortalTenantLlmUsageView }>("/api/portal/llm/usage"),
         portalApi<{ schedule: TenantScheduleConfig }>("/api/portal/schedule"),
         portalApi<PortalMemorySkillView>("/api/portal/memory-skill"),
         portalApi<{ settings: TenantPortalSettings }>("/api/portal/settings"),
@@ -92,6 +95,7 @@ export function CustomerPortalApp() {
       setTickets(ticketsRes.tickets);
       setApprovals(approvalsRes.approvals);
       setSpend(spendRes.spend);
+      setLlmUsage(llmUsageRes.usage);
       setBudgetDraft(spendRes.spend.policy);
       setSchedule(schedRes.schedule);
       setMemorySkill(memRes);
@@ -457,6 +461,46 @@ export function CustomerPortalApp() {
                 </div>
               </div>
             </div>
+
+            {llmUsage && (
+              <div className="rounded-xl border border-hairline bg-card p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-[15px] font-semibold">模型用量（只读）</h3>
+                  <span className="rounded-full bg-inset px-2.5 py-0.5 text-[11px] font-mono text-ink-secondary">
+                    当前模型：{llmUsage.activeModel ?? "暂未配置"}
+                  </span>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-lg border border-hairline bg-panel p-3 space-y-1">
+                    <div className="text-[12px] text-ink-secondary">今日用量</div>
+                    <div className="text-[15px] font-semibold tabular-nums text-ink">
+                      {llmUsage.todayTokens.toLocaleString()} tokens
+                    </div>
+                    <div className="text-[12px] text-ink-tertiary tabular-nums">
+                      费用：{llmUsage.todayRevenue.toFixed(4)} {llmUsage.currency}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-hairline bg-panel p-3 space-y-1">
+                    <div className="text-[12px] text-ink-secondary">当月累计（{llmUsage.month}）</div>
+                    <div className="text-[15px] font-semibold tabular-nums text-ink">
+                      {llmUsage.monthTokens.toLocaleString()} tokens
+                    </div>
+                    <div className="text-[12px] text-ink-tertiary tabular-nums">
+                      费用：{llmUsage.monthRevenue.toFixed(4)} {llmUsage.currency}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-hairline bg-panel p-3 space-y-1">
+                    <div className="text-[12px] text-ink-secondary">今日剩余额度</div>
+                    <div className="text-[15px] font-semibold tabular-nums text-ink">
+                      {llmUsage.remainingTokensToday.toLocaleString()} tokens
+                    </div>
+                    <div className="text-[12px] text-ink-tertiary tabular-nums">
+                      剩余费用：{llmUsage.remainingCostToday.toFixed(2)} / {llmUsage.maxCostPerDay} {llmUsage.currency}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div className="rounded-xl border border-hairline bg-card p-4 space-y-3">
               <div className="flex items-center justify-between">

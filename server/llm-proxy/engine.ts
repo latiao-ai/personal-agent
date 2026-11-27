@@ -5,15 +5,30 @@ import type {
   LlmProxyReadiness,
   LlmRelayProviderConfig,
   LlmVirtualTokenRecord,
+  PortalTenantLlmUsageView,
 } from "../../shared/llm-proxy.ts";
 import type { RoutingRole } from "../../shared/routing.ts";
 import type { ControlPlaneVault } from "../approvals/vault.ts";
 import type { JevModelVerdict, JevSmallModel } from "../routing/jev.ts";
+import type { LlmProxyStore } from "./store.ts";
 
 const CONTROL_PLANE_VAULT_TENANT = "_control_plane_llm";
 const DEFAULT_TOKEN_TTL_MS = 60 * 60_000;
 const DEFAULT_FAILURE_THRESHOLD = 3;
 const DEFAULT_COOLDOWN_MS = 30_000;
+const DEFAULT_MAX_TOKENS_PER_DAY = 200_000;
+const DEFAULT_MAX_COST_PER_DAY = 50;
+const TEST_PROVIDER_TIMEOUT_MS = 5_000;
+
+function formatApiKeyLast4(secret: string): string {
+  const trimmed = secret.trim();
+  if (!trimmed) return "";
+  return `****${trimmed.slice(-4)}`;
+}
+
+function formatUtcDate(ts: number): string {
+  return new Date(ts).toISOString().slice(0, 10);
+}
 
 export interface RelayProviderRegistration extends LlmRelayProviderConfig {
   /** Secret key name inside ControlPlaneVault's control-plane partition. */
@@ -56,6 +71,7 @@ export class LlmProxyError extends Error {
 
 export interface ControlPlaneLlmProxyOptions {
   vault: ControlPlaneVault;
+  store?: LlmProxyStore;
   fetchImpl?: typeof fetch;
   now?: () => number;
   failureThreshold?: number;
@@ -70,6 +86,7 @@ export interface ControlPlaneLlmProxyOptions {
  */
 export class ControlPlaneLlmProxy {
   private readonly vault: ControlPlaneVault;
+  private store: LlmProxyStore | null;
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
   private readonly failureThreshold: number;
@@ -77,11 +94,13 @@ export class ControlPlaneLlmProxy {
   private readonly providers: RelayProviderRegistration[] = [];
   private readonly providerSecrets = new Map<string, string>();
   private readonly virtualTokens = new Map<string, LlmVirtualTokenRecord>();
+  private readonly tenantBudgets = new Map<string, { maxTokensPerDay: number; maxCostPerDay: number }>();
   private readonly failureCounts = new Map<string, number>();
   private readonly circuitOpenedAt = new Map<string, number>();
 
   constructor(options: ControlPlaneLlmProxyOptions) {
     this.vault = options.vault;
+    this.store = options.store ?? null;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.now = options.now ?? Date.now;
     this.failureThreshold = options.failureThreshold ?? DEFAULT_FAILURE_THRESHOLD;
@@ -101,6 +120,245 @@ export class ControlPlaneLlmProxy {
         priority: 1,
       });
     }
+  }
+
+  /** Attaches the SQLite store for pricing lookups and daily usage recording. */
+  attachStore(store: LlmProxyStore): void {
+    this.store = store;
+  }
+
+  /** Migrates OMB_LLM_RELAY_* env vars into DB + Vault once if llm_providers is empty, then loads from DB. */
+  bootstrapFromEnvAndLoad(store: LlmProxyStore, autoBootstrapEnv = true): void {
+    this.store = store;
+    if (autoBootstrapEnv && store.listProviders().length === 0) {
+      const envBaseUrl = process.env.OMB_LLM_RELAY_BASE_URL?.trim();
+      const envApiKey = process.env.OMB_LLM_RELAY_API_KEY?.trim();
+      if (envBaseUrl && envApiKey) {
+        const defaultModel = process.env.OMB_LLM_RELAY_MODEL?.trim() || "deepseek-chat";
+        const fastModel = process.env.OMB_LLM_RELAY_FAST_MODEL?.trim() || "deepseek-chat";
+        const baseUrl = envBaseUrl.replace(/\/+$/, "");
+        store.upsertProvider({
+          id: "primary-deepseek-relay",
+          name: "DeepSeek Relay",
+          baseUrl,
+          defaultModel,
+          fastModel,
+          enabled: true,
+          priority: 1,
+          updatedBy: "env-bootstrap",
+          updatedAt: this.now(),
+        });
+        this.updateProvider({
+          id: "primary-deepseek-relay",
+          name: "DeepSeek Relay",
+          baseUrl,
+          apiKey: envApiKey,
+          defaultModel,
+          fastModel,
+          enabled: true,
+          priority: 1,
+        });
+      }
+    }
+    if (store.listProviders().length > 0) {
+      this.loadProvidersFromStore(store);
+    }
+  }
+
+  /** Returns sanitized read-only LLM usage for a tenant (no baseUrl, no API keys, no upstream cost). */
+  getPortalUsageView(tenantId: string): PortalTenantLlmUsageView {
+    const today = formatUtcDate(this.now());
+    const month = today.slice(0, 7);
+    const daily = this.store?.getUsage(tenantId, today) ?? { inputTokens: 0, outputTokens: 0, cost: 0, revenue: 0 };
+    const monthly = this.store?.getMonthlyUsage(tenantId, month) ?? { inputTokens: 0, outputTokens: 0, cost: 0, revenue: 0 };
+    const budget = this.getTenantBudget(tenantId);
+    const activeProvider = this.providers.find((p) => p.enabled) ?? null;
+    const todayTokens = daily.inputTokens + daily.outputTokens;
+    const monthTokens = monthly.inputTokens + monthly.outputTokens;
+    return {
+      tenantId,
+      date: today,
+      month,
+      activeModel: activeProvider?.defaultModel ?? null,
+      todayTokens,
+      todayRevenue: Number(daily.revenue.toFixed(6)),
+      monthTokens,
+      monthRevenue: Number(monthly.revenue.toFixed(6)),
+      maxTokensPerDay: budget.maxTokensPerDay,
+      maxCostPerDay: budget.maxCostPerDay,
+      remainingTokensToday: Math.max(0, budget.maxTokensPerDay - todayTokens),
+      remainingCostToday: Math.max(0, Number((budget.maxCostPerDay - daily.revenue).toFixed(6))),
+      currency: "CNY",
+    };
+  }
+
+  /** Loads enabled providers from control-plane DB; DB config overrides env bootstrap, keys come from Vault. */
+  loadProvidersFromStore(store: LlmProxyStore): void {
+    this.store = store;
+    const rows = store.listProviders();
+    this.providers.length = 0;
+
+    for (const row of rows) {
+      if (!row.enabled) continue;
+      const vaultSecretName = `llm_relay:${row.id}:api_key`;
+      const secret = this.vault.getSecret(CONTROL_PLANE_VAULT_TENANT, vaultSecretName) ?? this.providerSecrets.get(row.id);
+      if (!secret) {
+        console.warn(`[llm-proxy] skipping provider "${row.id}": API key not found in ControlPlaneVault`);
+        continue;
+      }
+      this.providerSecrets.set(row.id, secret);
+      this.providers.push({
+        id: row.id,
+        name: row.name,
+        baseUrl: row.baseUrl.replace(/\/+$/, ""),
+        defaultModel: row.defaultModel,
+        fastModel: row.fastModel || row.defaultModel,
+        enabled: true,
+        priority: row.priority,
+        vaultSecretName,
+      });
+    }
+    this.providers.sort((a, b) => a.priority - b.priority);
+  }
+
+  /** Updates or adds a provider in memory; writes Vault first when a new apiKey is provided. */
+  updateProvider(input: {
+    id: string;
+    name: string;
+    baseUrl: string;
+    apiKey?: string;
+    defaultModel: string;
+    fastModel?: string;
+    enabled: boolean;
+    priority: number;
+  }): void {
+    const vaultSecretName = `llm_relay:${input.id}:api_key`;
+    const trimmedKey = input.apiKey?.trim();
+    if (trimmedKey) {
+      this.vault.setSecret(CONTROL_PLANE_VAULT_TENANT, vaultSecretName, trimmedKey);
+      this.providerSecrets.set(input.id, trimmedKey);
+      this.failureCounts.delete(input.id);
+      this.circuitOpenedAt.delete(input.id);
+    }
+
+    const existingIdx = this.providers.findIndex((p) => p.id === input.id);
+    const entry: RelayProviderRegistration = {
+      id: input.id,
+      name: input.name,
+      baseUrl: input.baseUrl.replace(/\/+$/, ""),
+      defaultModel: input.defaultModel,
+      fastModel: input.fastModel?.trim() || input.defaultModel,
+      enabled: input.enabled,
+      priority: input.priority,
+      vaultSecretName,
+    };
+    if (existingIdx >= 0) {
+      this.providers[existingIdx] = entry;
+    } else {
+      this.providers.push(entry);
+    }
+    this.providers.sort((a, b) => a.priority - b.priority);
+  }
+
+  /** Replaces a provider's API key in Vault so the old key is immediately invalidated. */
+  rotateProviderApiKey(providerId: string, newApiKey: string): { apiKeyConfigured: boolean; apiKeyLast4: string } {
+    const trimmed = newApiKey.trim();
+    const vaultSecretName = `llm_relay:${providerId}:api_key`;
+    this.vault.setSecret(CONTROL_PLANE_VAULT_TENANT, vaultSecretName, trimmed);
+    this.providerSecrets.set(providerId, trimmed);
+    this.failureCounts.delete(providerId);
+    this.circuitOpenedAt.delete(providerId);
+    return {
+      apiKeyConfigured: Boolean(trimmed),
+      apiKeyLast4: formatApiKeyLast4(trimmed),
+    };
+  }
+
+  /** Returns masked key status for admin views; never exposes plaintext keys. */
+  getApiKeyMask(providerId: string): { apiKeyConfigured: boolean; apiKeyLast4: string } {
+    const vaultSecretName = `llm_relay:${providerId}:api_key`;
+    const secret = this.vault.getSecret(CONTROL_PLANE_VAULT_TENANT, vaultSecretName) ?? this.providerSecrets.get(providerId);
+    if (!secret) {
+      return { apiKeyConfigured: false, apiKeyLast4: "" };
+    }
+    return { apiKeyConfigured: true, apiKeyLast4: formatApiKeyLast4(secret) };
+  }
+
+  /** Sends a minimal probe call (max_tokens: 5, 5s timeout) without recording usage or altering active config. */
+  async testProvider(id: string): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
+    const stored = this.store?.getProvider(id);
+    const active = this.providers.find((p) => p.id === id);
+    const target = stored ?? active;
+    if (!target) {
+      return { ok: false, latencyMs: 0, error: "未找到目标模型供应商" };
+    }
+
+    const vaultSecretName = `llm_relay:${id}:api_key`;
+    const secret = this.vault.getSecret(CONTROL_PLANE_VAULT_TENANT, vaultSecretName) ?? this.providerSecrets.get(id);
+    if (!secret) {
+      return { ok: false, latencyMs: 0, error: "未配置 API Key" };
+    }
+
+    const startedAt = this.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TEST_PROVIDER_TIMEOUT_MS);
+    try {
+      const baseUrl = target.baseUrl.replace(/\/+$/, "");
+      const res = await this.fetchImpl(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${secret}`,
+        },
+        body: JSON.stringify({
+          model: target.fastModel || target.defaultModel,
+          max_tokens: 5,
+          temperature: 0,
+          messages: [{ role: "user", content: "ping" }],
+        }),
+        signal: controller.signal,
+      });
+      const latencyMs = Math.max(0, this.now() - startedAt);
+      if (!res.ok) {
+        return { ok: false, latencyMs, error: `中转站返回 HTTP ${res.status}` };
+      }
+      return { ok: true, latencyMs };
+    } catch (err) {
+      const latencyMs = Math.max(0, this.now() - startedAt);
+      const rawMsg = err instanceof Error ? err.message : "连接失败";
+      const safeMsg = rawMsg.replaceAll(secret, "[REDACTED]");
+      return { ok: false, latencyMs, error: safeMsg };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  getTenantBudget(tenantId: string): { maxTokensPerDay: number; maxCostPerDay: number } {
+    return (
+      this.tenantBudgets.get(tenantId) ?? {
+        maxTokensPerDay: DEFAULT_MAX_TOKENS_PER_DAY,
+        maxCostPerDay: DEFAULT_MAX_COST_PER_DAY,
+      }
+    );
+  }
+
+  setTenantBudget(
+    tenantId: string,
+    input: { maxTokensPerDay?: number; maxCostPerDay?: number },
+  ): { maxTokensPerDay: number; maxCostPerDay: number } {
+    const prev = this.getTenantBudget(tenantId);
+    const next = {
+      maxTokensPerDay: input.maxTokensPerDay ?? prev.maxTokensPerDay,
+      maxCostPerDay: input.maxCostPerDay ?? prev.maxCostPerDay,
+    };
+    this.tenantBudgets.set(tenantId, next);
+    for (const record of this.virtualTokens.values()) {
+      if (record.tenantId === tenantId) {
+        record.maxTokensPerDay = next.maxTokensPerDay;
+        record.maxCostUsdPerDay = next.maxCostPerDay;
+      }
+    }
+    return { ...next };
   }
 
   /** Registers an OpenAI-compatible relay provider; master API key is stored only in ControlPlaneVault. */
@@ -159,6 +417,7 @@ export class ControlPlaneLlmProxy {
     maxCostUsdPerDay?: number;
   }): { token: string; record: LlmVirtualTokenRecord } {
     const now = this.now();
+    const tenantBudget = this.getTenantBudget(input.tenantId);
     const token = `omb_vtk_${randomBytes(24).toString("hex")}`;
     const record: LlmVirtualTokenRecord = {
       tokenId: `vtk_${randomUUID()}`,
@@ -166,8 +425,8 @@ export class ControlPlaneLlmProxy {
       botId: input.botId,
       issuedAt: now,
       expiresAt: now + (input.ttlMs ?? DEFAULT_TOKEN_TTL_MS),
-      maxTokensPerDay: input.maxTokensPerDay ?? 200_000,
-      maxCostUsdPerDay: input.maxCostUsdPerDay ?? 50,
+      maxTokensPerDay: input.maxTokensPerDay ?? tenantBudget.maxTokensPerDay,
+      maxCostUsdPerDay: input.maxCostUsdPerDay ?? tenantBudget.maxCostPerDay,
       usedTokensToday: 0,
       usedCostUsdToday: 0,
       revokedAt: null,
@@ -251,6 +510,14 @@ export class ControlPlaneLlmProxy {
     signal?: AbortSignal,
   ): Promise<ChatCompletionResponse> {
     const tokenRecord = this.validateVirtualToken(rawVirtualToken);
+    const today = formatUtcDate(this.now());
+    if (this.store) {
+      const daily = this.store.getUsage(tokenRecord.tenantId, today);
+      const dailyTokens = daily.inputTokens + daily.outputTokens;
+      if (dailyTokens >= tokenRecord.maxTokensPerDay || daily.cost >= tokenRecord.maxCostUsdPerDay) {
+        throw new LlmProxyError(402, "budget_exceeded", "已超出租户每日模型额度上限，已熔断");
+      }
+    }
     const enabled = this.providers.filter((p) => p.enabled);
     if (enabled.length === 0) {
       throw new LlmProxyError(503, "relay_not_configured", "控制面尚未配置中转站 Provider");
@@ -262,7 +529,9 @@ export class ControlPlaneLlmProxy {
       if (state === "open") {
         continue;
       }
-      const masterKey = this.providerSecrets.get(provider.id);
+      const masterKey =
+        this.vault.getSecret(CONTROL_PLANE_VAULT_TENANT, provider.vaultSecretName) ??
+        this.providerSecrets.get(provider.id);
       if (!masterKey) {
         continue;
       }
@@ -290,9 +559,28 @@ export class ControlPlaneLlmProxy {
         }
         const data = (await res.json()) as ChatCompletionResponse;
         this.recordProviderSuccess(provider.id);
-        const totalTokens = data.usage?.total_tokens ?? 100;
+        const rawPrompt = data.usage?.prompt_tokens ?? 0;
+        const rawCompletion = data.usage?.completion_tokens ?? 0;
+        const hasUsage = Boolean(data.usage && (rawPrompt > 0 || rawCompletion > 0 || (data.usage.total_tokens ?? 0) > 0));
+        const promptTokens = hasUsage ? rawPrompt : 100;
+        const completionTokens = hasUsage ? rawCompletion : 0;
+        const totalTokens = hasUsage ? (data.usage?.total_tokens ?? promptTokens + completionTokens) : 100;
+
+        const pricing = this.store?.getPricing(provider.id) ?? null;
+        const cost = pricing
+          ? (promptTokens / 1_000_000) * pricing.costPer1MInputTokens +
+            (completionTokens / 1_000_000) * pricing.costPer1MOutputTokens
+          : (totalTokens / 1_000_000) * 0.5;
+        const revenue = pricing
+          ? (promptTokens / 1_000_000) * pricing.pricePer1MInputTokens +
+            (completionTokens / 1_000_000) * pricing.pricePer1MOutputTokens
+          : cost;
+
+        if (this.store) {
+          this.store.addUsage(tokenRecord.tenantId, provider.id, today, promptTokens, completionTokens, cost, revenue);
+        }
         tokenRecord.usedTokensToday += totalTokens;
-        tokenRecord.usedCostUsdToday += Number(((totalTokens / 1_000_000) * 0.5).toFixed(6));
+        tokenRecord.usedCostUsdToday += Number(cost.toFixed(8));
         return data;
       } catch (err) {
         this.recordProviderFailure(provider.id);

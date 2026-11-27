@@ -21,6 +21,7 @@ import type {
   UserIdentity,
   WeixinIdentity,
 } from "../../shared/portal.ts";
+import { LLM_TABLES_SQL } from "../llm-proxy/store.ts";
 import { PortalUnifiedStore, stripUserSecrets, type StoredPortalUserAccount } from "./unified-store.ts";
 
 export { stripUserSecrets, type StoredPortalUserAccount };
@@ -249,6 +250,8 @@ export class PortalStore {
         updated_by TEXT NOT NULL,
         PRIMARY KEY (tenant_id, platform)
       );
+
+      ${LLM_TABLES_SQL}
     `);
 
     for (const column of ["user_id TEXT", "username TEXT"]) {
@@ -262,6 +265,10 @@ export class PortalStore {
 
   close(): void {
     this.db.close();
+  }
+
+  getDb(): DatabaseSync {
+    return this.db;
   }
 
   // --- Tenant Members ---

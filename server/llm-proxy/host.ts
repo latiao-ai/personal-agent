@@ -9,8 +9,8 @@ export interface LlmProxyHost {
 }
 
 /** Composes the control-plane OpenAI-compatible DeepSeek relay proxy outside server/index.ts. */
-export function createLlmProxyHost(deps: { vault: ControlPlaneVault }): LlmProxyHost {
-  const engine = new ControlPlaneLlmProxy({ vault: deps.vault });
+export function createLlmProxyHost(deps: { vault: ControlPlaneVault; engine?: ControlPlaneLlmProxy }): LlmProxyHost {
+  const engine = deps.engine ?? new ControlPlaneLlmProxy({ vault: deps.vault });
   return {
     engine,
     routes: createLlmProxyRoutes(engine),

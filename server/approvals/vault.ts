@@ -29,6 +29,11 @@ export class ControlPlaneVault {
     bucket.set(name, value);
   }
 
+  /** Control-plane internal lookup for a stored credential; never exposed to VMs or clients. */
+  getSecret(tenantId: string, name: string): string | undefined {
+    return this.tenantSecrets.get(tenantId)?.get(name);
+  }
+
   /** Lists secret names (never values) registered for a tenant. */
   listSecretNames(tenantId: string): string[] {
     return [...(this.tenantSecrets.get(tenantId)?.keys() ?? [])];

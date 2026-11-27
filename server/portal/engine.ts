@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import type { ApprovalButtonAction, ApprovalCard, DualBudgetPolicy, FeishuCardCallbackResult } from "../../shared/approvals.ts";
 import type { VmQuota } from "../../shared/isolation.ts";
+import type { AdminLlmProviderView, LlmPricing, PortalTenantLlmUsageView, TenantLlmUsage } from "../../shared/llm-proxy.ts";
 import type { SkillSpec } from "../../shared/memory-skill.ts";
 import type {
   AdminAccount,
@@ -35,6 +36,8 @@ import type { Ticket } from "../../shared/tickets.ts";
 import { formatApprovalStatusBanner, type ApprovalCardEvent, type ApprovalEngine } from "../approvals/engine.ts";
 import { DATA_DIR } from "../config.ts";
 import type { IsolationEngine } from "../isolation/engine.ts";
+import { ControlPlaneLlmProxy } from "../llm-proxy/engine.ts";
+import { LlmProxyStore } from "../llm-proxy/store.ts";
 import type { MemorySkillEngine } from "../memory-skill/engine.ts";
 import type { PatrolEngine } from "../patrol/engine.ts";
 import type { TicketEngine } from "../tickets/engine.ts";
@@ -63,6 +66,8 @@ export interface PortalEngineOptions {
   patrol: PatrolEngine;
   memorySkill: MemorySkillEngine;
   isolation: IsolationEngine;
+  llmProxy?: ControlPlaneLlmProxy;
+  autoBootstrapLlmEnv?: boolean;
   now?: () => number;
   qrBaseUrl?: string;
   bootstrapAdmin?: { username: string; password: string; displayName?: string };
@@ -75,6 +80,8 @@ export interface PortalEngineOptions {
  */
 export class PortalEngine {
   readonly store: PortalStore;
+  readonly llmStore: LlmProxyStore;
+  readonly llmProxy: ControlPlaneLlmProxy;
   readonly tickets: TicketEngine;
   readonly approvals: ApprovalEngine;
   readonly patrol: PatrolEngine;
@@ -91,17 +98,25 @@ export class PortalEngine {
   constructor(options: PortalEngineOptions) {
     this.now = options.now ?? Date.now;
     this.store = new PortalStore(options.dbPath ?? join(DATA_DIR, "portal.sqlite"));
+    this.llmStore = new LlmProxyStore(this.store.getDb());
     this.tickets = options.tickets;
     this.approvals = options.approvals;
     this.patrol = options.patrol;
     this.memorySkill = options.memorySkill;
     this.isolation = options.isolation;
+    this.llmProxy =
+      options.llmProxy ??
+      new ControlPlaneLlmProxy({ vault: this.approvals.vault, store: this.llmStore, now: this.now });
+    this.llmProxy.bootstrapFromEnvAndLoad(this.llmStore, options.autoBootstrapLlmEnv !== false);
+
     this.qrBaseUrl = options.qrBaseUrl ?? "feishu://openmausbot/qr-login";
     this.adminOps = new PortalAdminOps({
       store: this.store,
       approvals: this.approvals,
       isolation: this.isolation,
       memorySkill: this.memorySkill,
+      llmProxy: this.llmProxy,
+      llmStore: this.llmStore,
       now: this.now,
       registerTenantMember: (i) => this.registerTenantMember(i),
       recordAudit: (e) => this.recordAudit(e),
@@ -967,4 +982,15 @@ export class PortalEngine {
   listChannelBindings(session: CustomerSession, options?: { botId?: string; requestedTenantId?: string | null }): ChannelBinding[] { this.assertTenantScope(session, options?.requestedTenantId, "channel_binding"); return this.store.listChannelBindings({ tenantId: session.tenantId, botId: options?.botId }); }
   getTenantChannelAllowlist(session: CustomerSession, platform: ChannelPlatform, requestedTenantId?: string | null): TenantChannelAllowlist { this.assertTenantScope(session, requestedTenantId, "channel_allowlist"); return this.unifiedOps.getTenantAllowlist(session.tenantId, platform); }
   setTenantChannelAllowlist(session: CustomerSession, platform: ChannelPlatform, allowedSenderIds: string[], requestedTenantId?: string | null): TenantChannelAllowlist { this.assertTenantScope(session, requestedTenantId, "channel_allowlist"); this.assertCustomerAdmin(session, "set_channel_allowlist"); return this.unifiedOps.setTenantAllowlist(session, platform, allowedSenderIds); }
+
+  // 9. Admin LLM Provider / Pricing / Quota & Customer Read-Only LLM Usage
+  listLlmProvidersAsAdmin(actor: AdminSession): AdminLlmProviderView[] { return this.adminOps.listLlmProviders(actor); }
+  saveLlmProviderAsAdmin(actor: AdminSession, input: Parameters<PortalAdminOps["saveLlmProvider"]>[1]): AdminLlmProviderView { return this.adminOps.saveLlmProvider(actor, input); }
+  rotateLlmApiKeyAsAdmin(actor: AdminSession, providerId: string, newApiKey: string, confirm: boolean): AdminLlmProviderView { return this.adminOps.rotateLlmApiKey(actor, providerId, newApiKey, confirm); }
+  testLlmProviderAsAdmin(actor: AdminSession, providerId: string): Promise<{ ok: boolean; latencyMs: number; error?: string }> { return this.adminOps.testLlmProvider(actor, providerId); }
+  getLlmPricingAsAdmin(providerId: string): LlmPricing { return this.adminOps.getLlmPricing(providerId); }
+  setLlmPricingAsAdmin(actor: AdminSession, providerId: string, input: Parameters<PortalAdminOps["setLlmPricing"]>[2]): LlmPricing { return this.adminOps.setLlmPricing(actor, providerId, input); }
+  setTenantLlmBudgetAsAdmin(actor: AdminSession, tenantId: string, input: Parameters<PortalAdminOps["setTenantLlmBudget"]>[2]): { tenantId: string; maxTokensPerDay: number; maxCostPerDay: number } { return this.adminOps.setTenantLlmBudget(actor, tenantId, input); }
+  getTenantLlmUsageAsAdmin(actor: AdminSession, tenantId: string, date?: string): TenantLlmUsage { return this.adminOps.getTenantLlmUsage(actor, tenantId, date); }
+  getCustomerLlmUsage(session: CustomerSession, requestedTenantId?: string | null): PortalTenantLlmUsageView { this.assertTenantScope(session, requestedTenantId, "llm_usage"); return this.llmProxy.getPortalUsageView(session.tenantId); }
 }
